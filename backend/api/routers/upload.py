@@ -1,136 +1,183 @@
+import asyncio
 import logging
 from pathlib import Path
-import uuid
+from urllib.parse import parse_qs, urlparse
+from uuid import UUID, uuid4
 
-from fastapi import (
-    APIRouter,
-    BackgroundTasks,
-    Depends,
-    File,
-    Form,
-    HTTPException,
-    UploadFile,
-)
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
+from pydantic import BaseModel, Field
 
 from core.auth import AuthenticatedUser, get_current_user
+from core.config import settings
+from core.job_launcher import JobLaunchError, launch_cloud_run_job
+from core.pipeline_state import build_initial_pipeline_state
 from db.supabase_admin import supabase_admin
-from core.langgraph_app import run_pipeline, PipelineState
+
 
 router = APIRouter(prefix="/jobs", tags=["jobs"])
 logger = logging.getLogger(__name__)
-MAX_PDF_BYTES = 50 * 1024 * 1024
 
-def process_pipeline_background(job_id: str, pdf_storage_path: str,
-                                manhwa_name: str = "", genre: str = "", chapter_number: str = ""):
-    state: PipelineState = {
-        "job_id": job_id,
-        "pdf_storage_path": pdf_storage_path,
-        "page_urls": [],
-        "panels": [],
-        "ocr_results": [],
-        "status": "UPLOADED",
-        "series_context": "",
-        "chapter_info": {},
-        "story_summary": "",
-        "scenes": [],
-        "panel_descriptions": [],
-        "rolling_summary": "",
-        "narration": [],
-        "audio_urls": [],
-        "error": None,
-        "manhwa_name": manhwa_name,
-        "genre": genre,
-        "chapter_number": chapter_number,
-        "timings": [],
-        "combined_audio_url": "",
-        "combined_audio_path": "",
-    }
-    print(f"🚀 Starting pipeline for job {job_id}")
-    try:
-        final_state = run_pipeline(state)
-        supabase_admin.table("processing_jobs").update({
-            "status": final_state["status"],
-            "state_json": final_state
-        }).eq("id", job_id).execute()
-    except Exception as e:
-        supabase_admin.table("processing_jobs").update({
-            "status": "FAILED",
-            "state_json": {"error": str(e)}
-        }).eq("id", job_id).execute()
 
-@router.post("/upload")
-async def upload_pdf(
-    background_tasks: BackgroundTasks,
+class CreatePdfUploadRequest(BaseModel):
+    filename: str = Field(min_length=1, max_length=255)
+    size_bytes: int = Field(gt=0)
+    content_type: str = Field(default="application/pdf", max_length=100)
+    manhwa_name: str = Field(default="", max_length=200)
+    genre: str = Field(default="", max_length=100)
+    chapter_number: str = Field(default="", max_length=50)
+
+
+def _response_dict(response: object) -> dict:
+    if isinstance(response, dict):
+        return response
+    if hasattr(response, "model_dump"):
+        return response.model_dump()
+    if hasattr(response, "dict"):
+        return response.dict()
+    return {}
+
+
+def _signed_upload_token(response: object) -> str:
+    data = _response_dict(response)
+    token = data.get("token")
+    if token:
+        return str(token)
+
+    signed_url = (
+        data.get("signedURL")
+        or data.get("signedUrl")
+        or data.get("signed_url")
+    )
+    if signed_url:
+        query_token = parse_qs(urlparse(str(signed_url)).query).get("token", [])
+        if query_token:
+            return query_token[0]
+    raise RuntimeError("Supabase did not return a signed-upload token")
+
+
+def _rpc_scalar(response: object) -> object:
+    data = getattr(response, "data", None)
+    if isinstance(data, list):
+        return data[0] if data else ""
+    return data
+
+
+@router.post("/upload-url", status_code=status.HTTP_201_CREATED)
+async def create_pdf_upload(
+    request: CreatePdfUploadRequest,
     current_user: AuthenticatedUser = Depends(get_current_user),
-    # Accept both 'file' and 'manga_pdf' for the PDF
-    file: UploadFile = File(None),
-    manga_pdf: UploadFile = File(None),
-    manga_name: str = Form(""),
-    manga_genre: str = Form(""),
-    chapter_number: str = Form(""),
-    manhwa_name: str = Form(""),   # alternative field names
-    genre: str = Form(""),
 ):
-    # Determine which file was sent
-    pdf_file = file or manga_pdf
-    if not pdf_file:
-        raise HTTPException(status_code=400, detail="No PDF file provided")
-
-    filename = Path(pdf_file.filename or "upload.pdf").name
+    filename = Path(request.filename).name
     if not filename.lower().endswith(".pdf"):
-        raise HTTPException(status_code=400, detail="Only PDF files allowed")
+        raise HTTPException(status_code=400, detail="Only PDF files are allowed")
+    if request.content_type.lower() not in {"application/pdf", "application/x-pdf"}:
+        raise HTTPException(status_code=400, detail="The file content type must be application/pdf")
+    if request.size_bytes > settings.max_pdf_bytes:
+        max_mb = settings.max_pdf_bytes // (1024 * 1024)
+        raise HTTPException(status_code=413, detail=f"PDF must be {max_mb} MB or smaller")
 
-    pdf_bytes = await pdf_file.read(MAX_PDF_BYTES + 1)
-    if len(pdf_bytes) > MAX_PDF_BYTES:
-        raise HTTPException(status_code=413, detail="PDF must be 50 MB or smaller")
-    if not pdf_bytes.startswith(b"%PDF-"):
-        raise HTTPException(status_code=400, detail="The uploaded file is not a valid PDF")
+    job_id = str(uuid4())
+    file_path = f"{job_id}/source.pdf"
+    initial_state = build_initial_pipeline_state(
+        job_id,
+        file_path,
+        manhwa_name=request.manhwa_name,
+        genre=request.genre,
+        chapter_number=request.chapter_number,
+    )
 
-    file_path = f"{uuid.uuid4()}/source.pdf"
-
-    # Upload to Supabase
     try:
-        supabase_admin.storage.from_("pdfs").upload(
-            path=file_path,
-            file=pdf_bytes,
-            file_options={"content-type": "application/pdf"}
+        signed_response = supabase_admin.storage.from_("pdfs").create_signed_upload_url(
+            file_path
         )
+        upload_token = _signed_upload_token(signed_response)
+        creation_result = _rpc_scalar(supabase_admin.rpc(
+            "create_processing_upload",
+            {
+                "p_job_id": job_id,
+                "p_cognito_sub": current_user.sub,
+                "p_pdf_storage_path": file_path,
+                "p_state_json": initial_state,
+                "p_max_pending_uploads": settings.max_pending_uploads_per_user,
+                "p_max_pending_uploads_global": settings.max_pending_uploads_global,
+            },
+        ).execute())
     except Exception:
-        logger.exception("Supabase PDF upload failed")
-        raise HTTPException(status_code=500, detail="PDF upload failed")
+        logger.exception("Could not prepare PDF upload for job %s", job_id)
+        raise HTTPException(status_code=500, detail="Could not prepare the PDF upload")
 
-    pdf_url_response = supabase_admin.storage.from_("pdfs").create_signed_url(
-        file_path, 600
-    )
-    if isinstance(pdf_url_response, str):
-        pdf_url = pdf_url_response
-    else:
-        pdf_url = (
-            pdf_url_response.get("signedURL")
-            or pdf_url_response.get("signedUrl")
-            or pdf_url_response.get("signed_url")
+    if creation_result in {"PENDING_LIMIT", "GLOBAL_PENDING_LIMIT"}:
+        raise HTTPException(
+            status_code=429,
+            detail="Too many pending uploads. Finish or wait for an earlier upload to expire.",
         )
-
-    job = supabase_admin.table("processing_jobs").insert({
-        "status": "UPLOADED",
-        "pdf_storage_path": file_path,
-        "cognito_sub": current_user.sub,
-    }).execute()
-    job_id = job.data[0]["id"]
-
-    # Use the most specific names provided
-    final_manhwa_name = manhwa_name or manga_name
-    final_genre = genre or manga_genre
-
-    background_tasks.add_task(
-        process_pipeline_background,
-        job_id, file_path,
-        final_manhwa_name, final_genre, chapter_number
-    )
+    if creation_result != "CREATED":
+        logger.error("Unexpected upload reservation result for job %s", job_id)
+        raise HTTPException(status_code=500, detail="Could not prepare the PDF upload")
 
     return {
         "job_id": job_id,
-        "pdf_url": pdf_url,
-        "status": "UPLOADED",
-        "message": "PDF uploaded successfully. Processing started."
+        "path": file_path,
+        "token": upload_token,
+        "expires_in": 7200,
+        "max_bytes": settings.max_pdf_bytes,
     }
+
+
+@router.post("/{job_id}/start", status_code=status.HTTP_202_ACCEPTED)
+async def start_job(
+    job_id: UUID,
+    background_tasks: BackgroundTasks,
+    current_user: AuthenticatedUser = Depends(get_current_user),
+):
+    job_id_value = str(job_id)
+    reservation = supabase_admin.rpc(
+        "queue_processing_job",
+        {
+            "p_job_id": job_id_value,
+            "p_cognito_sub": current_user.sub,
+            "p_max_user_starts_30d": settings.max_pipeline_starts_per_user_30d,
+            "p_max_global_starts_30d": settings.max_pipeline_starts_global_30d,
+        },
+    ).execute()
+    reservation_result = _rpc_scalar(reservation)
+
+    if reservation_result == "NOT_FOUND":
+        raise HTTPException(status_code=404, detail="Job not found")
+    if reservation_result in {"BUSY", "USER_LIMIT", "GLOBAL_LIMIT"}:
+        messages = {
+            "BUSY": "Another pipeline job is running. Please try again later.",
+            "USER_LIMIT": "Your 30-day processing limit has been reached.",
+            "GLOBAL_LIMIT": "The service's 30-day processing limit has been reached.",
+        }
+        raise HTTPException(status_code=429, detail=messages[reservation_result])
+    if isinstance(reservation_result, str) and reservation_result.startswith("ALREADY_"):
+        current_status = reservation_result.removeprefix("ALREADY_")
+        return {"job_id": job_id_value, "status": current_status, "already_started": True}
+    if reservation_result != "QUEUED":
+        raise HTTPException(status_code=409, detail="Job cannot be started in its current state")
+
+    execution_mode = settings.pipeline_execution_mode.strip().lower()
+    try:
+        if execution_mode == "local":
+            from core.pipeline_runner import process_queued_job
+
+            background_tasks.add_task(process_queued_job, job_id_value)
+        elif execution_mode == "cloud_run":
+            await asyncio.to_thread(launch_cloud_run_job, job_id_value)
+        else:
+            raise JobLaunchError(
+                "PIPELINE_EXECUTION_MODE must be either local or cloud_run"
+            )
+    except JobLaunchError:
+        (
+            supabase_admin.table("processing_jobs")
+            .update({"status": "UPLOAD_PENDING", "started_at": None})
+            .eq("id", job_id_value)
+            .eq("status", "QUEUED")
+            .execute()
+        )
+        logger.exception("Could not launch pipeline job %s", job_id_value)
+        raise HTTPException(status_code=503, detail="Processing could not be started. Please retry.")
+
+    return {"job_id": job_id_value, "status": "QUEUED", "already_started": False}

@@ -1,4 +1,5 @@
 import { fetchAuthSession } from "aws-amplify/auth";
+import { supabase } from "../lib/supabaseClient";
 
 
 const API_URL = import.meta.env.VITE_API_BASE_URL?.replace(/\/$/, "");
@@ -62,13 +63,66 @@ async function authenticatedFetch(path, options = {}) {
   return payload;
 }
 
-// Start a new job.
-export const generateAudioStory = async (formData) => {
-  const data = await authenticatedFetch("/jobs/upload", {
+// Create a user-bound upload, send the PDF directly to private storage, then
+// start the backend pipeline. The PDF never passes through the Cloud Run API.
+export const generateAudioStory = async ({
+  file,
+  mangaName = "",
+  genre = "",
+  chapterNumber = "",
+  pendingJobId = "",
+}) => {
+  if (pendingJobId) {
+    const resumed = await authenticatedFetch(
+      `/jobs/${encodeURIComponent(pendingJobId)}/start`,
+      { method: "POST" },
+    );
+    return { task_id: resumed.job_id };
+  }
+
+  const contentType = file.type || "application/pdf";
+  const upload = await authenticatedFetch("/jobs/upload-url", {
     method: "POST",
-    body: formData,
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      filename: file.name,
+      size_bytes: file.size,
+      content_type: contentType,
+      manhwa_name: mangaName,
+      genre,
+      chapter_number: chapterNumber,
+    }),
   });
-  return { task_id: data.job_id };
+
+  let storageResult;
+  try {
+    storageResult = await supabase.storage
+      .from("pdfs")
+      .uploadToSignedUrl(upload.path, upload.token, file, {
+        contentType,
+        upsert: false,
+      });
+  } catch {
+    throw new ApiError("The PDF upload could not be completed. Please retry.", 502);
+  }
+  if (storageResult.error) {
+    throw new ApiError(
+      storageResult.error.message || "The PDF upload could not be completed.",
+      502,
+    );
+  }
+
+  let started;
+  try {
+    started = await authenticatedFetch(
+      `/jobs/${encodeURIComponent(upload.job_id)}/start`,
+      { method: "POST" },
+    );
+  } catch (error) {
+    if (error instanceof ApiError) error.pendingJobId = upload.job_id;
+    throw error;
+  }
+  return { task_id: started.job_id };
 };
 
 // Poll a job that belongs to the signed-in Cognito user.
@@ -95,6 +149,9 @@ export const checkTaskStatus = async (taskId) => {
   }
 
   const progressMap = {
+    UPLOAD_PENDING: 2,
+    QUEUED: 5,
+    PROCESSING: 8,
     UPLOADED: 5,
     EXTRACTED: 15,
     PANELS_DETECTED: 30,

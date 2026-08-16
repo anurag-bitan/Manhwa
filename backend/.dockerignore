@@ -1,7 +1,10 @@
-.venv
-__pycache__
-*.pyc
-.git
-.vscode
-.idea
-*.md
+.env
+.env.*
+!.env.example
+.venv/
+__pycache__/
+*.py[cod]
+tests/
+filetree.md
+docker-compose.yml
+yolov8n.pt

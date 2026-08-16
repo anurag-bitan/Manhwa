@@ -23,6 +23,12 @@ import {
 import { ApiError, generateAudioStory, checkTaskStatus } from '../api/api';
 import { generateVideoFromScenes } from '../utils/videoMaker';
 
+const configuredMaxPdfMb = Number(import.meta.env.VITE_MAX_PDF_MB || 50);
+const MAX_PDF_MB = Number.isFinite(configuredMaxPdfMb) && configuredMaxPdfMb > 0
+  ? configuredMaxPdfMb
+  : 50;
+const MAX_PDF_BYTES = MAX_PDF_MB * 1024 * 1024;
+
 const UploadPage = () => {
   const [file, setFile] = useState(null);
   const [mangaName, setMangaName] = useState("");
@@ -39,6 +45,7 @@ const UploadPage = () => {
   const [videoProgress, setVideoProgress] = useState(0);
   const [videoLogs, setVideoLogs] = useState([]);
   const [isDownloading, setIsDownloading] = useState(false);
+  const [pendingJobId, setPendingJobId] = useState("");
 
   const fileInputRef = useRef(null);
   const videoContainerRef = useRef(null);
@@ -165,14 +172,16 @@ const UploadPage = () => {
 
   const validateFile = (fileToValidate) => {
     if (!fileToValidate) return false;
-    if (!fileToValidate.type.includes("pdf")) {
+    const hasPdfName = fileToValidate.name?.toLowerCase().endsWith(".pdf");
+    const hasPdfType = !fileToValidate.type || fileToValidate.type.includes("pdf");
+    if (!hasPdfName || !hasPdfType) {
       setError("Please upload a PDF file");
       showToast.error("Please upload a PDF file");
       return false;
     }
-    if (fileToValidate.size > 50 * 1024 * 1024) {
-      setError("PDF must be < 50MB");
-      showToast.error("PDF file size must be less than 50MB");
+    if (fileToValidate.size > MAX_PDF_BYTES) {
+      setError(`PDF must be ${MAX_PDF_MB} MB or smaller`);
+      showToast.error(`PDF file size must be ${MAX_PDF_MB} MB or smaller`);
       return false;
     }
     setError(null);
@@ -190,6 +199,7 @@ const UploadPage = () => {
       setProgress(0);
       setError(null);
       setVideoLogs([]);
+      setPendingJobId("");
 
       sessionStorage.removeItem("pendingStory");
       sessionStorage.removeItem("pendingFileName");
@@ -213,6 +223,7 @@ const UploadPage = () => {
     setPanelImages([]);
     setStoryData(null);
     setVideoLogs([]);
+    setPendingJobId("");
 
     sessionStorage.removeItem("pendingStory");
     sessionStorage.removeItem("pendingFileName");
@@ -240,14 +251,16 @@ const UploadPage = () => {
     sessionStorage.removeItem("pendingVideoUrl");
 
     try {
-      const formData = new FormData();
-      formData.append("manga_pdf", file);
-      formData.append("manga_name", mangaName);
-      formData.append("manga_genre", "Action");
-
       // 1. START THE TASK (Get Task ID)
-      const startResponse = await generateAudioStory(formData);
+      setProgress(2);
+      const startResponse = await generateAudioStory({
+        file,
+        mangaName,
+        genre: "Action",
+        pendingJobId,
+      });
       const taskId = startResponse.task_id;
+      setPendingJobId("");
       console.log("Task started with ID:", taskId);
 
       // 2. POLL FOR UPDATES (Every 2 seconds)
@@ -329,6 +342,9 @@ const UploadPage = () => {
 
     } catch (err) {
       console.error("Story generation initiation error:", err);
+      if (err instanceof ApiError && err.pendingJobId) {
+        setPendingJobId(err.pendingJobId);
+      }
       setError(err.message || String(err));
       setIsProcessing(false);
       setProgress(0);
@@ -601,7 +617,7 @@ const UploadPage = () => {
                 </div>
                 <p className="text-lg sm:text-xl md:text-2xl font-semibold mb-1 sm:mb-2 text-center px-2">Drop your manga PDF here</p>
                 <p className="text-gray-400 text-xs sm:text-sm text-center">or click to browse</p>
-                <p className="text-gray-500 text-xs mt-2 sm:mt-3 md:mt-4 text-center">Maximum file size: 50MB</p>
+                <p className="text-gray-500 text-xs mt-2 sm:mt-3 md:mt-4 text-center">Maximum file size: {MAX_PDF_MB} MB</p>
               </div>
             ) : (
               <div className="flex items-center gap-3 sm:gap-4 md:gap-6">

@@ -1,4 +1,5 @@
 from fastapi import APIRouter, Depends, HTTPException
+from uuid import UUID
 
 from core.auth import AuthenticatedUser, get_current_user
 from core.config import settings
@@ -26,13 +27,13 @@ def create_signed_asset_url(bucket: str, path: str) -> str:
 
 @router.get("/{job_id}")
 async def get_job_status(
-    job_id: str,
+    job_id: UUID,
     current_user: AuthenticatedUser = Depends(get_current_user),
 ):
     job = (
         supabase_admin.table("processing_jobs")
         .select("status,state_json")
-        .eq("id", job_id)
+        .eq("id", str(job_id))
         .eq("cognito_sub", current_user.sub)
         .execute()
     )
@@ -42,18 +43,22 @@ async def get_job_status(
 
 @router.get("/{job_id}/assets")
 async def get_job_assets(
-    job_id: str,
+    job_id: UUID,
     current_user: AuthenticatedUser = Depends(get_current_user),
 ):
     job = (
         supabase_admin.table("processing_jobs")
         .select("state_json,status")
-        .eq("id", job_id)
+        .eq("id", str(job_id))
         .eq("cognito_sub", current_user.sub)
         .execute()
     )
-    if not job.data or not job.data[0].get("state_json"):
-        raise HTTPException(status_code=404, detail="Job not found or not finished")
+    if not job.data:
+        raise HTTPException(status_code=404, detail="Job not found")
+    if job.data[0].get("status") != "TTS_COMPLETED":
+        raise HTTPException(status_code=409, detail="Job assets are not ready")
+    if not job.data[0].get("state_json"):
+        raise HTTPException(status_code=500, detail="Completed job assets are unavailable")
     state = job.data[0]["state_json"]
 
     scenes = state.get("scenes", [])

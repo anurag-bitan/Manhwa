@@ -12,6 +12,8 @@
 !.env.example
 *.pem
 *.key
+/backend/deploy/*.env.yaml
+!/backend/deploy/*.env.yaml.example
 
 # Frontend build output
 node_modules/

@@ -1,4 +1,3 @@
-from core.celery_app import celery_app
 from db.supabase_admin import supabase_admin
 from storage3.exceptions import StorageApiError
 import pypdfium2 as pdfium
@@ -131,10 +130,9 @@ def _find_spine_gap(img, search_ratio=0.2, min_gap_width=15):
 
 
 # -------------------------------------------------------------------
-# Celery tasks
+# Synchronous processing functions used by one Cloud Run Job execution
 # -------------------------------------------------------------------
-@celery_app.task(bind=True)
-def extract_pages_task(self, pdf_storage_path: str, job_id: str):
+def extract_pages(pdf_storage_path: str, job_id: str):
     pdf_bytes = supabase_admin.storage.from_("pdfs").download(pdf_storage_path)
     pdf = pdfium.PdfDocument(pdf_bytes)
 
@@ -168,8 +166,7 @@ def extract_pages_task(self, pdf_storage_path: str, job_id: str):
     return page_data_list
 
 
-@celery_app.task(bind=True)
-def detect_panels_task(self, page_path: str, page_number: int):
+def detect_panels(page_path: str, page_number: int):
     """Detect panels on any page layout (single, spread, partial spread)."""
     img_bytes = supabase_admin.storage.from_("pages").download(page_path)
     pil_img = Image.open(io.BytesIO(img_bytes)).convert('L')
@@ -198,7 +195,7 @@ def detect_panels_task(self, page_path: str, page_number: int):
             col_boxes = _split_into_columns(half_img)
             for col_x1, col_x2 in col_boxes:
                 col_img = half_img[:, col_x1:col_x2]
-                panel_rows = _split_into_rows(col_img, col_x1, col_x2)
+                panel_rows = _split_into_rows(col_img, col_x1)
                 for bx1, by1, bx2, by2 in panel_rows:
                     all_boxes.append([x_off + bx1, y_off + by1,
                                       x_off + bx2, y_off + by2])
@@ -206,15 +203,14 @@ def detect_panels_task(self, page_path: str, page_number: int):
         col_boxes = _split_into_columns(img)
         for col_x1, col_x2 in col_boxes:
             col_img = img[:, col_x1:col_x2]
-            panel_rows = _split_into_rows(col_img, col_x1, col_x2)
+            panel_rows = _split_into_rows(col_img, col_x1)
             all_boxes.extend(panel_rows)
 
     all_boxes.sort(key=lambda b: b[1])
     return {"page_number": page_number, "boxes": all_boxes}
 
 
-@celery_app.task(bind=True)
-def crop_and_ocr_task(self, panel_data: dict, panel_index: int):
+def crop_and_ocr(panel_data: dict, panel_index: int):
     """Crop a panel and run OCR, returning extracted text."""
     page_path = panel_data["page_path"]
     img_bytes = supabase_admin.storage.from_("pages").download(page_path)
@@ -233,7 +229,7 @@ def crop_and_ocr_task(self, panel_data: dict, panel_index: int):
     cropped_np = np.array(cropped)
 
     # Run PaddleOCR
-    result = _ocr.ocr(cropped_np)
+    result = get_ocr().ocr(cropped_np)
 
     # Extract text
     text = ""

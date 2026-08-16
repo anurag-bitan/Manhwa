@@ -15,7 +15,8 @@ another user's job. Supabase files are served with two-hour signed URLs.
 ## Safe deployment order
 
 1. Back up the Supabase database.
-2. Run `backend/db/migrations/001_cognito_job_ownership.sql` in the Supabase SQL
+2. Run `backend/db/migrations/001_cognito_job_ownership.sql`, then
+   `backend/db/migrations/002_pipeline_launch_quota.sql`, in the Supabase SQL
    editor. Confirm that the `pdfs`, `pages`, and `audio` buckets are private.
 3. Review Supabase policies. The browser must not have a permissive `SELECT`
    policy on `processing_jobs` or `storage.objects`; only the backend service
@@ -196,8 +197,8 @@ production. Keep `SUPABASE_SERVICE_ROLE_KEY` only in the backend secret store.
 ## Verification checklist
 
 - `GET /health` returns 200 without a token.
-- `POST /jobs/upload`, `GET /jobs/{id}`, `GET /jobs/{id}/assets`, and
-  `GET /db-test` return 401 without a bearer token.
+- `POST /jobs/upload-url`, `POST /jobs/{id}/start`, `GET /jobs/{id}`,
+  `GET /jobs/{id}/assets`, and `GET /db-test` return 401 without a bearer token.
 - Email OTP signup and sign-in both complete, then `/upload` opens.
 - The browser's job requests contain an access token in the Authorization
   header; tokens never appear in URLs or application logs.

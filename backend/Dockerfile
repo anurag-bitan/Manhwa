@@ -16,16 +16,20 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
-# Copy requirements first (caching)
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+ENV PYTHONUNBUFFERED=1 \
+    PADDLEOCR_HOME=/opt/paddleocr
 
-# Install PaddlePaddle and PaddleOCR (using fast mirror, longer timeout)
-RUN pip install paddlepaddle==2.6.2 -i https://pypi.tuna.tsinghua.edu.cn/simple
-RUN pip install paddleocr==2.7.3 -i https://pypi.tuna.tsinghua.edu.cn/simple --default-timeout=300
+# Copy requirements first (caching)
+COPY requirements-api.txt requirements-worker.txt ./
+RUN pip install --no-cache-dir -r requirements-worker.txt
+
+# Install the pinned OCR runtime from the default Python package index.
+RUN pip install --no-cache-dir --default-timeout=300 paddlepaddle==2.6.2
+RUN pip install --no-cache-dir --default-timeout=300 paddleocr==2.7.3
+RUN python -c "from paddleocr import PaddleOCR; PaddleOCR(lang='en', show_log=False)"
 
 # Copy the rest of the backend code
 COPY . .
 
-# Run the Celery worker
-CMD ["celery", "-A", "core.celery_app", "worker", "--loglevel=info", "--pool=solo"]
+# Run exactly one queued pipeline execution. Cloud Run injects JOB_ID.
+CMD ["python", "-m", "workers.run_job"]

@@ -1,35 +1,14 @@
 services:
-  redis:
-    image: redis:alpine
-    restart: unless-stopped
-    ports:
-      - "6379:6379"
-
   api:
-    build: .
-    image: manhwa-worker
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: manhwa-backend-local
     env_file:
       - .env
     environment:
-      - REDIS_URL=redis://redis:6379/0
-      - CELERY_BROKER_URL=redis://redis:6379/0
-    depends_on:
-      - redis
-      - worker
+      - PIPELINE_EXECUTION_MODE=local
     restart: unless-stopped
     command: uvicorn main:app --host 0.0.0.0 --port 8000
     ports:
       - "8000:8000"
-
-  worker:
-    build: .                  # <-- this tells Compose to build from the Dockerfile in the current folder
-    image: manhwa-worker      # optional tag
-    env_file:
-      - .env
-    environment:
-      - REDIS_URL=redis://redis:6379/0
-      - CELERY_BROKER_URL=redis://redis:6379/0
-    depends_on:
-      - redis
-    restart: unless-stopped
-    command: celery -A core.celery_app worker --loglevel=info --pool=solo

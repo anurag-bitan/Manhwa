@@ -29,27 +29,22 @@ class PipelineState(TypedDict):
     chapter_number: str
 
 def extract_pages_node(state: PipelineState) -> PipelineState:
-    """Trigger background extraction task and wait for result."""
-    from workers.tasks import extract_pages_task
-    result = extract_pages_task.delay(state["pdf_storage_path"], state["job_id"])
-    page_urls = result.get(timeout=120)
+    """Extract pages inside the current pipeline job."""
+    from workers.tasks import extract_pages
+
+    page_urls = extract_pages(state["pdf_storage_path"], state["job_id"])
     state["page_urls"] = page_urls
     state["status"] = "EXTRACTED"
     update_job_status(state["job_id"], state["status"])
     return state
 
 def detect_panels_node(state: PipelineState) -> PipelineState:
-    from workers.tasks import detect_panels_task
+    from workers.tasks import detect_panels
 
-    tasks = []
-    for i, page in enumerate(state["page_urls"]):
-        page_path = page["path"]
-        tasks.append(detect_panels_task.delay(page_path, i))
-
-    panels_all = []
-    for task in tasks:
-        result = task.get(timeout=120)
-        panels_all.append(result)
+    panels_all = [
+        detect_panels(page["path"], i)
+        for i, page in enumerate(state["page_urls"])
+    ]
 
     all_panels = []
     for page_data in panels_all:
@@ -86,17 +81,13 @@ def update_job_status(job_id: str, status: str):
 
 
 def crop_and_ocr_node(state: PipelineState) -> PipelineState:
-    """Crop each panel and run OCR in parallel."""
-    from workers.tasks import crop_and_ocr_task
+    """Crop each panel and run OCR inside the current pipeline job."""
+    from workers.tasks import crop_and_ocr
 
-    tasks = []
-    for idx, panel in enumerate(state["panels"]):
-        tasks.append(crop_and_ocr_task.delay(panel, idx))
-
-    ocr_results = []
-    for task in tasks:
-        result = task.get(timeout=None)
-        ocr_results.append(result)
+    ocr_results = [
+        crop_and_ocr(panel, idx)
+        for idx, panel in enumerate(state["panels"])
+    ]
 
     ocr_results.sort(key=lambda x: x["panel_index"])
     state["ocr_results"] = ocr_results

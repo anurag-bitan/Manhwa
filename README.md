@@ -5,7 +5,7 @@ Monorepo for the Manhwa AI frontend and processing backend.
 ## Repository layout
 
 - `frontend/` — React + Vite web application, deployed with AWS Amplify Hosting
-- `backend/` — FastAPI API, Celery worker, Redis integration, OCR, and video processing
+- `backend/` — FastAPI API plus an on-demand Cloud Run OCR/LLM/TTS job
 - `docs/` — Cognito and deployment-related setup notes
 - `amplify.yml` — Amplify monorepo build specification
 
@@ -34,6 +34,6 @@ Set-Location backend
 docker compose up --build
 ```
 
-Amplify must use `frontend` as the monorepo application root. The FastAPI,
-Celery, and Redis services require separate backend compute and are not run by
-Amplify Hosting.
+Amplify must use `frontend` as the monorepo application root. Production uses a
+small Cloud Run API and a separate on-demand Cloud Run Job; neither runs in
+Amplify Hosting. See `docs/HYBRID_AWS_GCP_DEPLOYMENT.md` for the complete setup.
