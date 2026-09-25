@@ -1,0 +1,3 @@
+# Optional: only for legacy Cloud Run Job launcher deployments
+google-cloud-aiplatform>=1.60.0,<2
+google-cloud-run>=0.16.0,<1

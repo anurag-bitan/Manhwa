@@ -10,7 +10,9 @@ class PipelineStateTests(unittest.TestCase):
             "job-123/source.pdf",
             manhwa_name="  Example  ",
             genre=" Action ",
+            season=" 2 ",
             chapter_number=" 7 ",
+            series_context=" Short blurb. ",
         )
 
         self.assertEqual(state["status"], "UPLOAD_PENDING")
@@ -18,7 +20,9 @@ class PipelineStateTests(unittest.TestCase):
         self.assertEqual(state["pdf_storage_path"], "job-123/source.pdf")
         self.assertEqual(state["manhwa_name"], "Example")
         self.assertEqual(state["genre"], "Action")
+        self.assertEqual(state["season"], "2")
         self.assertEqual(state["chapter_number"], "7")
+        self.assertEqual(state["series_context"], "Short blurb.")
         self.assertIsNone(state["error"])
 
     def test_lists_are_not_shared_between_jobs(self):

@@ -1,0 +1,30 @@
+# Render Blueprint: connect repo at https://dashboard.render.com/blueprints
+# Docs: docs/RENDER_VERCEL.md
+services:
+  - type: web
+    name: manhwa-api
+    runtime: docker
+    dockerfilePath: backend/Dockerfile
+    dockerContext: backend
+    plan: free
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      - key: PIPELINE_EXECUTION_MODE
+        value: local
+      - key: PYTHONUNBUFFERED
+        value: "1"
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false
+      - key: FIREBASE_PROJECT_ID
+        sync: false
+      - key: FIREBASE_SERVICE_ACCOUNT_JSON
+        sync: false
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: CORS_ALLOWED_ORIGINS
+        sync: false
+      - key: GEMINI_MODEL
+        value: gemini-2.5-flash

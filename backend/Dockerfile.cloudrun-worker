@@ -1,6 +1,6 @@
-# Render / Docker: API + local pipeline. Same as Dockerfile.space.
 FROM python:3.10-slim
 
+# Install all required system dependencies (including OpenGL for OpenCV)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libgomp1 \
     libglib2.0-0 \
@@ -17,9 +17,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /app
 
 ENV PYTHONUNBUFFERED=1 \
-    PADDLEOCR_HOME=/opt/paddleocr \
-    PORT=10000 \
-    PIPELINE_EXECUTION_MODE=local
+    PADDLEOCR_HOME=/opt/paddleocr
 
 COPY requirements-api.txt requirements-worker.txt ./
 RUN pip install --no-cache-dir -r requirements-worker.txt
@@ -30,6 +28,4 @@ RUN python -c "from paddleocr import PaddleOCR; PaddleOCR(lang='en', show_log=Fa
 
 COPY . .
 
-EXPOSE 10000
-
-CMD ["sh", "-c", "uvicorn main:app --host 0.0.0.0 --port ${PORT}"]
+CMD ["python", "-m", "workers.run_job"]

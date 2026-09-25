@@ -20,7 +20,7 @@ import {
   Minimize,
 } from "lucide-react";
 
-import { ApiError, generateAudioStory, checkTaskStatus } from '../api/api';
+import { ApiError, generateAudioStory, checkTaskStatus, previewManhwaContext } from '../api/api';
 import { generateVideoFromScenes } from '../utils/videoMaker';
 
 const configuredMaxPdfMb = Number(import.meta.env.VITE_MAX_PDF_MB || 50);
@@ -32,6 +32,12 @@ const MAX_PDF_BYTES = MAX_PDF_MB * 1024 * 1024;
 const UploadPage = () => {
   const [file, setFile] = useState(null);
   const [mangaName, setMangaName] = useState("");
+  const [season, setSeason] = useState("");
+  const [chapterNumber, setChapterNumber] = useState("");
+  const [genre, setGenre] = useState("");
+  const [seriesContext, setSeriesContext] = useState("");
+  const [contextLoading, setContextLoading] = useState(false);
+  const [contextGrounded, setContextGrounded] = useState(false);
   const [mode, setMode] = useState("images");
   const [videoUrl, setVideoUrl] = useState(null);
   const [videoBlob, setVideoBlob] = useState(null);
@@ -50,7 +56,7 @@ const UploadPage = () => {
   const fileInputRef = useRef(null);
   const videoContainerRef = useRef(null);
   const videoRef = useRef(null);
-
+  const contextDebounceRef = useRef(null);
 
   const navigate = useNavigate();
   const location = useLocation();
@@ -97,6 +103,53 @@ const UploadPage = () => {
       }
     }
   }, []);
+
+  useEffect(() => {
+    if (contextDebounceRef.current) {
+      clearTimeout(contextDebounceRef.current);
+    }
+
+    const trimmedName = mangaName.trim();
+    if (!trimmedName || trimmedName.length < 2) {
+      setSeriesContext("");
+      setContextGrounded(false);
+      setContextLoading(false);
+      return;
+    }
+
+    setContextLoading(true);
+    contextDebounceRef.current = setTimeout(async () => {
+      try {
+        const preview = await previewManhwaContext({
+          manhwaName: trimmedName,
+          season,
+          chapterNumber,
+          genre,
+        });
+        setSeriesContext(preview.context || "");
+        setContextGrounded(Boolean(preview.grounded));
+      } catch (err) {
+        if (err instanceof ApiError && err.status === 401) {
+          await logout().catch(() => {});
+          navigate("/login", {
+            replace: true,
+            state: { from: { pathname: location.pathname } },
+          });
+          return;
+        }
+        setSeriesContext("");
+        setContextGrounded(false);
+      } finally {
+        setContextLoading(false);
+      }
+    }, 600);
+
+    return () => {
+      if (contextDebounceRef.current) {
+        clearTimeout(contextDebounceRef.current);
+      }
+    };
+  }, [mangaName, season, chapterNumber, genre, logout, navigate, location.pathname]);
 
   // Save video generation state to session storage
   useEffect(() => {
@@ -193,7 +246,9 @@ const UploadPage = () => {
       setFile(selectedFile);
       setVideoUrl(null);
       setVideoBlob(null);
-      setMangaName(selectedFile.name.replace(".pdf", ""));
+      if (!mangaName.trim()) {
+        setMangaName(selectedFile.name.replace(/\.pdf$/i, ""));
+      }
       setPanelImages([]);
       setStoryData(null);
       setProgress(0);
@@ -216,6 +271,11 @@ const UploadPage = () => {
   const removeFile = () => {
     setFile(null);
     setMangaName("");
+    setSeason("");
+    setChapterNumber("");
+    setGenre("");
+    setSeriesContext("");
+    setContextGrounded(false);
     setVideoUrl(null);
     setVideoBlob(null);
     setError(null);
@@ -256,7 +316,10 @@ const UploadPage = () => {
       const startResponse = await generateAudioStory({
         file,
         mangaName,
-        genre: "Action",
+        genre,
+        season,
+        chapterNumber,
+        seriesContext,
         pendingJobId,
       });
       const taskId = startResponse.task_id;
@@ -721,6 +784,66 @@ const UploadPage = () => {
           <div className="flex items-center gap-2 sm:gap-3 mb-4 sm:mb-5 md:mb-6">
             <Settings className="w-4 h-4 sm:w-5 sm:h-5 md:w-6 md:h-6 text-purple-400 flex-shrink-0" />
             <h3 className="text-base sm:text-lg md:text-xl font-semibold">Settings</h3>
+          </div>
+
+          <div className="space-y-3 mb-5">
+            <label className="text-xs sm:text-sm text-gray-400 font-medium block">Manhwa name</label>
+            <input
+              type="text"
+              value={mangaName}
+              onChange={(e) => setMangaName(e.target.value)}
+              placeholder="e.g. Solo Leveling"
+              className="w-full rounded-lg border border-gray-700 bg-gray-800/40 px-3 py-2 text-sm text-white placeholder-gray-500 focus:border-purple-500 focus:outline-none"
+            />
+            <div className="grid grid-cols-2 gap-2">
+              <div>
+                <label className="text-xs text-gray-500 block mb-1">Season (optional)</label>
+                <input
+                  type="text"
+                  value={season}
+                  onChange={(e) => setSeason(e.target.value)}
+                  placeholder="1"
+                  className="w-full rounded-lg border border-gray-700 bg-gray-800/40 px-3 py-2 text-sm text-white placeholder-gray-500 focus:border-purple-500 focus:outline-none"
+                />
+              </div>
+              <div>
+                <label className="text-xs text-gray-500 block mb-1">Chapter (optional)</label>
+                <input
+                  type="text"
+                  value={chapterNumber}
+                  onChange={(e) => setChapterNumber(e.target.value)}
+                  placeholder="5"
+                  className="w-full rounded-lg border border-gray-700 bg-gray-800/40 px-3 py-2 text-sm text-white placeholder-gray-500 focus:border-purple-500 focus:outline-none"
+                />
+              </div>
+            </div>
+            <div>
+              <label className="text-xs text-gray-500 block mb-1">Genre (optional)</label>
+              <input
+                type="text"
+                value={genre}
+                onChange={(e) => setGenre(e.target.value)}
+                placeholder="Action"
+                className="w-full rounded-lg border border-gray-700 bg-gray-800/40 px-3 py-2 text-sm text-white placeholder-gray-500 focus:border-purple-500 focus:outline-none"
+              />
+            </div>
+            {(contextLoading || seriesContext) && (
+              <div className="rounded-lg border border-purple-500/20 bg-purple-500/5 p-3">
+                <p className="text-xs font-medium text-purple-300 mb-1">
+                  {contextLoading ? "Fetching series context..." : "Series context (max 50 words)"}
+                </p>
+                <p className="text-xs text-gray-300 leading-relaxed">
+                  {contextLoading
+                    ? "Searching trusted sources..."
+                    : seriesContext || "No grounded context found. Story will use PDF panels only."}
+                </p>
+                {!contextLoading && seriesContext && (
+                  <p className="text-[10px] text-gray-500 mt-1">
+                    {contextGrounded ? "Search-grounded" : "Ungrounded"}
+                  </p>
+                )}
+              </div>
+            )}
           </div>
 
           <label className="text-xs sm:text-sm text-gray-400 font-medium mb-2 sm:mb-3 block">Generation Mode</label>

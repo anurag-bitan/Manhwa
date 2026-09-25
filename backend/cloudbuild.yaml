@@ -1,5 +1,5 @@
 substitutions:
-  _REGION: europe-north1
+  _REGION: europe-west1
   _REPOSITORY: manhwa
 
 steps:
@@ -15,7 +15,7 @@ steps:
     args:
       - build
       - --file
-      - Dockerfile
+      - Dockerfile.cloudrun-worker
       - --tag
       - ${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPOSITORY}/manhwa-worker:latest
       - .

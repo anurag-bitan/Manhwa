@@ -7,7 +7,9 @@ def build_initial_pipeline_state(
     *,
     manhwa_name: str = "",
     genre: str = "",
+    season: str = "",
     chapter_number: str = "",
+    series_context: str = "",
 ) -> dict[str, Any]:
     """Return the serializable state shared by the API and pipeline job."""
     return {
@@ -17,7 +19,7 @@ def build_initial_pipeline_state(
         "panels": [],
         "ocr_results": [],
         "status": "UPLOAD_PENDING",
-        "series_context": "",
+        "series_context": series_context.strip(),
         "chapter_info": {},
         "story_summary": "",
         "scenes": [],
@@ -28,6 +30,7 @@ def build_initial_pipeline_state(
         "error": None,
         "manhwa_name": manhwa_name.strip(),
         "genre": genre.strip(),
+        "season": season.strip(),
         "chapter_number": chapter_number.strip(),
         "timings": [],
         "combined_audio_url": "",

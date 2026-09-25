@@ -1,6 +1,5 @@
-import { fetchAuthSession } from "aws-amplify/auth";
+import { auth } from "../lib/firebaseClient";
 import { supabase } from "../lib/supabaseClient";
-
 
 const API_URL = import.meta.env.VITE_API_BASE_URL?.replace(/\/$/, "");
 
@@ -31,12 +30,13 @@ function errorMessage(payload, status) {
   return `Backend request failed (${status})`;
 }
 
-async function getAccessToken() {
+async function getIdToken() {
+  const currentUser = auth.currentUser;
+  if (!currentUser) {
+    throw new ApiError("Your session expired. Please sign in again.", 401);
+  }
   try {
-    const session = await fetchAuthSession();
-    const accessToken = session.tokens?.accessToken;
-    if (!accessToken) throw new Error("No access token");
-    return accessToken.toString();
+    return await currentUser.getIdToken();
   } catch {
     throw new ApiError("Your session expired. Please sign in again.", 401);
   }
@@ -48,7 +48,7 @@ async function authenticatedFetch(path, options = {}) {
   }
 
   const headers = new Headers(options.headers);
-  headers.set("Authorization", `Bearer ${await getAccessToken()}`);
+  headers.set("Authorization", `Bearer ${await getIdToken()}`);
 
   const response = await fetch(`${API_URL}${path}`, {
     ...options,
@@ -63,13 +63,35 @@ async function authenticatedFetch(path, options = {}) {
   return payload;
 }
 
-// Create a user-bound upload, send the PDF directly to private storage, then
-// start the backend pipeline. The PDF never passes through the Cloud Run API.
+export const previewManhwaContext = async ({
+  manhwaName,
+  season = "",
+  chapterNumber = "",
+  genre = "",
+}) => {
+  if (!manhwaName?.trim()) {
+    return { context: "", grounded: false, word_count: 0 };
+  }
+
+  return authenticatedFetch("/context/preview", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      manhwa_name: manhwaName.trim(),
+      season: season.trim(),
+      chapter_number: chapterNumber.trim(),
+      genre: genre.trim(),
+    }),
+  });
+};
+
 export const generateAudioStory = async ({
   file,
   mangaName = "",
   genre = "",
+  season = "",
   chapterNumber = "",
+  seriesContext = "",
   pendingJobId = "",
 }) => {
   if (pendingJobId) {
@@ -90,7 +112,9 @@ export const generateAudioStory = async ({
       content_type: contentType,
       manhwa_name: mangaName,
       genre,
+      season,
       chapter_number: chapterNumber,
+      series_context: seriesContext,
     }),
   });
 
@@ -125,7 +149,6 @@ export const generateAudioStory = async ({
   return { task_id: started.job_id };
 };
 
-// Poll a job that belongs to the signed-in Cognito user.
 export const checkTaskStatus = async (taskId) => {
   const encodedTaskId = encodeURIComponent(taskId);
   const job = await authenticatedFetch(`/jobs/${encodedTaskId}`);

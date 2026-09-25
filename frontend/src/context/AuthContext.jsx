@@ -4,41 +4,26 @@ import React, {
   useState,
 } from "react";
 import {
-  autoSignIn,
-  confirmSignIn,
-  confirmSignUp,
-  fetchAuthSession,
-  getCurrentUser,
-  resendSignUpCode,
-  signIn,
-  signInWithRedirect,
+  createUserWithEmailAndPassword,
+  onAuthStateChanged,
+  signInWithEmailAndPassword,
+  signInWithPopup,
   signOut,
-  signUp,
-} from "aws-amplify/auth";
-import { Hub } from "aws-amplify/utils";
-import { cognitoConfig } from "../lib/cognitoClient";
+} from "firebase/auth";
+import { auth, googleProvider, firebaseConfigStatus } from "../lib/firebaseClient";
 import { normalizeAuthError } from "../lib/authErrors";
 import { AuthContextValue } from "./authContextValue";
 
-const AUTH_FLOW_KEY = "cognito_email_auth_flow";
-
-function normalizeEmail(email) {
-  return email.trim().toLowerCase();
-}
-
-async function readCurrentUser() {
-  const currentUser = await getCurrentUser();
-  const session = await fetchAuthSession();
-  const attributes = session.tokens?.idToken?.payload || {};
-
+function mapFirebaseUser(firebaseUser) {
+  if (!firebaseUser) return null;
   return {
-    id: currentUser.userId,
-    username: currentUser.username,
-    email:
-      attributes.email ||
-      currentUser.signInDetails?.loginId ||
-      currentUser.username,
-    attributes,
+    id: firebaseUser.uid,
+    username: firebaseUser.email || firebaseUser.displayName || firebaseUser.uid,
+    email: firebaseUser.email || "",
+    attributes: {
+      email: firebaseUser.email,
+      name: firebaseUser.displayName,
+    },
   };
 }
 
@@ -47,154 +32,38 @@ export const AuthProvider = ({ children }) => {
   const [loading, setLoading] = useState(true);
 
   const refreshUser = useCallback(async () => {
-    try {
-      const currentUser = await readCurrentUser();
-      setUser(currentUser);
-      return currentUser;
-    } catch {
-      setUser(null);
-      return null;
-    } finally {
-      setLoading(false);
-    }
+    const current = auth.currentUser;
+    const mapped = mapFirebaseUser(current);
+    setUser(mapped);
+    setLoading(false);
+    return mapped;
   }, []);
 
   useEffect(() => {
-    refreshUser();
-
-    const stopListening = Hub.listen("auth", ({ payload }) => {
-      if (["signedIn", "tokenRefresh"].includes(payload.event)) {
-        refreshUser();
-      }
-      if (payload.event === "signedOut") {
-        setUser(null);
-        setLoading(false);
-      }
+    const unsubscribe = onAuthStateChanged(auth, (firebaseUser) => {
+      setUser(mapFirebaseUser(firebaseUser));
+      setLoading(false);
     });
+    return unsubscribe;
+  }, []);
 
-    return stopListening;
-  }, [refreshUser]);
-
-  const startExistingUserSignIn = async (email) => {
-    const result = await signIn({
-      username: email,
-      options: {
-        authFlowType: "USER_AUTH",
-        preferredChallenge: "EMAIL_OTP",
-      },
-    });
-
-    if (result.nextStep.signInStep === "CONFIRM_SIGN_UP") {
-      const resendResult = await resendSignUpCode({ username: email });
-      sessionStorage.setItem(AUTH_FLOW_KEY, "signUp");
-      return resendResult;
-    }
-
-    if (result.nextStep.signInStep !== "CONFIRM_SIGN_IN_WITH_EMAIL_CODE") {
-      throw new Error(
-        `Cognito returned an unexpected sign-in step: ${result.nextStep.signInStep}`,
-      );
-    }
-
-    sessionStorage.setItem(AUTH_FLOW_KEY, "signIn");
-    return result;
-  };
-
-  const resendOtp = async (rawEmail) => {
-    const email = normalizeEmail(rawEmail);
-    const flow = sessionStorage.getItem(AUTH_FLOW_KEY);
-
+  const signInWithEmail = async (rawEmail, rawPassword) => {
+    const email = rawEmail.trim().toLowerCase();
+    const password = rawPassword;
     try {
-      if (flow === "signUp") {
-        const result = await resendSignUpCode({ username: email });
-        return { data: result, error: null };
-      }
-
-      return {
-        data: await startExistingUserSignIn(email),
-        error: null,
-      };
+      await signInWithEmailAndPassword(auth, email, password);
+      await refreshUser();
+      return { data: { session: true }, error: null };
     } catch (error) {
       return { data: null, error: normalizeAuthError(error) };
     }
   };
 
-  const sendOtp = async (rawEmail, mode = "signIn") => {
-    const email = normalizeEmail(rawEmail);
-
+  const signUpWithEmail = async (rawEmail, rawPassword) => {
+    const email = rawEmail.trim().toLowerCase();
+    const password = rawPassword;
     try {
-      if (mode === "signIn") {
-        return {
-          data: await startExistingUserSignIn(email),
-          error: null,
-        };
-      }
-
-      const result = await signUp({
-        username: email,
-        options: {
-          userAttributes: { email },
-          autoSignIn: { authFlowType: "USER_AUTH" },
-        },
-      });
-
-      if (result.nextStep.signUpStep !== "CONFIRM_SIGN_UP") {
-        throw new Error(
-          `Cognito returned an unexpected sign-up step: ${result.nextStep.signUpStep}`,
-        );
-      }
-
-      sessionStorage.setItem(AUTH_FLOW_KEY, "signUp");
-      return { data: result, error: null };
-    } catch (error) {
-      return { data: null, error: normalizeAuthError(error) };
-    }
-  };
-
-  const verifyOtp = async (rawEmail, rawToken) => {
-    const email = normalizeEmail(rawEmail);
-    const token = rawToken.trim();
-    const flow = sessionStorage.getItem(AUTH_FLOW_KEY);
-
-    try {
-      if (flow === "signUp") {
-        const confirmation = await confirmSignUp({
-          username: email,
-          confirmationCode: token,
-        });
-
-        if (confirmation.nextStep.signUpStep === "COMPLETE_AUTO_SIGN_IN") {
-          const result = await autoSignIn();
-          if (result.nextStep.signInStep !== "DONE") {
-            throw new Error(
-              `Cognito returned an unexpected auto sign-in step: ${result.nextStep.signInStep}`,
-            );
-          }
-        } else if (confirmation.nextStep.signUpStep === "DONE") {
-          await startExistingUserSignIn(email);
-          return {
-            data: { session: false, newSignInCodeSent: true },
-            error: null,
-          };
-        } else {
-          throw new Error(
-            `Cognito returned an unexpected confirmation step: ${confirmation.nextStep.signUpStep}`,
-          );
-        }
-      } else if (flow === "signIn") {
-        const result = await confirmSignIn({ challengeResponse: token });
-        if (result.nextStep.signInStep !== "DONE") {
-          throw new Error(
-            `Cognito returned an unexpected confirmation step: ${result.nextStep.signInStep}`,
-          );
-        }
-      } else {
-        const expiredSession = new Error("The email sign-in session expired.");
-        expiredSession.name = "EmailSignInSessionExpired";
-        throw expiredSession;
-      }
-
-      sessionStorage.removeItem(AUTH_FLOW_KEY);
+      await createUserWithEmailAndPassword(auth, email, password);
       await refreshUser();
       return { data: { session: true }, error: null };
     } catch (error) {
@@ -203,40 +72,40 @@ export const AuthProvider = ({ children }) => {
   };
 
   const signInWithGoogle = async () => {
-    if (!cognitoConfig.googleEnabled) {
+    if (!firebaseConfigStatus.googleEnabled) {
       return {
         data: null,
-        error: normalizeAuthError({ name: "OAuthNotConfigured" }),
+        error: normalizeAuthError({ code: "auth/operation-not-allowed" }),
       };
     }
 
     try {
-      await signInWithRedirect({ provider: "Google" });
-      return { data: { redirecting: true }, error: null };
+      await signInWithPopup(auth, googleProvider);
+      await refreshUser();
+      return { data: { session: true }, error: null };
     } catch (error) {
       return {
         data: null,
         error: normalizeAuthError(error, {
           fallbackTitle: "Google sign-in failed",
-          fallbackMessage: "We could not start Google sign-in. Please try again.",
+          fallbackMessage: "We could not complete Google sign-in. Please try again.",
         }),
       };
     }
   };
 
   const logout = async () => {
-    sessionStorage.removeItem(AUTH_FLOW_KEY);
-    await signOut();
+    await signOut(auth);
+    setUser(null);
   };
 
   const value = {
     user,
     loading,
-    sendOtp,
-    resendOtp,
-    verifyOtp,
+    signInWithEmail,
+    signUpWithEmail,
     signInWithGoogle,
-    googleEnabled: cognitoConfig.googleEnabled,
+    googleEnabled: firebaseConfigStatus.googleEnabled,
     logout,
     refreshUser,
   };

@@ -1,7 +1,8 @@
 from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from api.routers import upload 
-from api.routers import jobs  
+from api.routers import upload
+from api.routers import jobs
+from api.routers import context
 from core.auth import AuthenticatedUser, get_current_user
 from core.config import settings
 from db.supabase_admin import supabase_admin
@@ -19,6 +20,7 @@ app.add_middleware(
 
 app.include_router(upload.router)
 app.include_router(jobs.router)
+app.include_router(context.router)
 
 
 @app.get("/")

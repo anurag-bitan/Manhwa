@@ -3,7 +3,7 @@ from typing import TypedDict, List, Optional
 from db.supabase_admin import supabase_admin
 import asyncio
 import re
-import json
+import io
 
 class PipelineState(TypedDict):
     job_id: str
@@ -17,7 +17,7 @@ class PipelineState(TypedDict):
     story_summary: str
     scenes: List[dict]
     panel_descriptions: List[str]
-    rolling_summary: str        # kept for compatibility, not actively used
+    rolling_summary: str
     narration: List[dict]
     error: Optional[str]
     audio_urls: List[dict]
@@ -26,10 +26,10 @@ class PipelineState(TypedDict):
     timings: List[dict]
     manhwa_name: str
     genre: str
+    season: str
     chapter_number: str
 
 def extract_pages_node(state: PipelineState) -> PipelineState:
-    """Extract pages inside the current pipeline job."""
     from workers.tasks import extract_pages
 
     page_urls = extract_pages(state["pdf_storage_path"], state["job_id"])
@@ -73,7 +73,6 @@ def detect_panels_node(state: PipelineState) -> PipelineState:
 
 
 def update_job_status(job_id: str, status: str):
-    """Quickly push the current status to the DB."""
     try:
         supabase_admin.table("processing_jobs").update({"status": status}).eq("id", job_id).execute()
     except Exception as e:
@@ -81,7 +80,6 @@ def update_job_status(job_id: str, status: str):
 
 
 def crop_and_ocr_node(state: PipelineState) -> PipelineState:
-    """Crop each panel and run OCR inside the current pipeline job."""
     from workers.tasks import crop_and_ocr
 
     ocr_results = [
@@ -95,84 +93,32 @@ def crop_and_ocr_node(state: PipelineState) -> PipelineState:
     update_job_status(state["job_id"], state["status"])
     return state
 
-def detect_chapter_and_storyline_node(state: PipelineState) -> PipelineState:
-    """Identify the manhwa, chapter, and provide series context using Groq."""
-    from groq import Groq
-    from core.config import settings
-    print("In detect_chapter_and_storyline_node")
-    client = Groq(api_key=settings.groq_api_key)
 
-    # If user provided info, use it directly
-    if state.get("manhwa_name") and state.get("chapter_number"):
-        state["chapter_info"] = {
-            "title": state["manhwa_name"],
-            "chapter": f"Chapter {state['chapter_number']}",
-            "is_correct": True
-        }
-        # Generate context via LLM still
-        ocr_text = " ".join([ocr["text"] for ocr in state["ocr_results"][:3] if ocr["text"]])[:1500]
-        prompt = f"""You are a manhwa expert. The manhwa is "{state['manhwa_name']}" (genre: {state.get('genre', 'unknown')}), chapter {state['chapter_number']}.
-        Write a 3-5 sentence series context that describes the story up to this chapter. Include the protagonist's name, their goal, and recent events.
-        OCR from first pages: {ocr_text}
-        Respond ONLY with the context string, no extra text."""
-        resp = client.chat.completions.create(
-            model="llama-3.1-8b-instant",
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.3,
-            max_tokens=300,
-        )
-        state["series_context"] = resp.choices[0].message.content.strip()
-        state["status"] = "CHAPTER_DETECTED"
-        update_job_status(state["job_id"], state["status"])
-        return state
+def apply_chapter_metadata_node(state: PipelineState) -> PipelineState:
+    """Set chapter metadata from user input. Series context comes from upload preview."""
+    title = (state.get("manhwa_name") or "").strip() or "Unknown"
+    chapter_num = (state.get("chapter_number") or "").strip()
+    season = (state.get("season") or "").strip()
 
-    # Otherwise infer
-    ocr_text = " ".join([ocr["text"] for ocr in state["ocr_results"][:3] if ocr["text"]])[:2000]
-    prompt = f"""You are an expert manhwa analyst. You have OCR text from the first pages of a manhwa PDF.
+    chapter_label = f"Chapter {chapter_num}" if chapter_num else "Chapter ?"
+    if season:
+        chapter_label = f"Season {season}, {chapter_label}"
 
-    Your tasks:
-    1. **Identify the manhwa title** (e.g., "Solo Leveling").
-    2. **Identify the chapter number** – if the OCR seems to start in the middle of a chapter, detect the actual chapter.
-    3. **Auto‑correct** if the OCR suggests a chapter that doesn't match the story's typical numbering.
-    4. **Write a short series context** (3-5 sentences) that describes the story up to **this** chapter, so a YouTube narrator can seamlessly introduce the episode.
-
-    ##STRICT NOTE :
-    Respond ONLY with a JSON object with these keys:
-    - "title": string
-    - "chapter": string (e.g., "Chapter 5")
-    - "is_correct": boolean (whether you corrected the chapter)
-    - "context": string (the story background)
-
-    OCR text:
-    {ocr_text}
-    """
-    try:
-        resp = client.chat.completions.create(
-            model="llama-3.1-8b-instant",
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.2,
-            max_tokens=400,
-        )
-        raw = resp.choices[0].message.content.strip()
-        match = re.search(r'\{.*\}', raw, re.DOTALL)
-        if match:
-            data = json.loads(match.group(0))
-            state["chapter_info"] = data
-            state["series_context"] = data["context"]
-        else:
-            raise ValueError("No JSON found")
-    except Exception as e:
-        state["chapter_info"] = {"title": "Unknown", "chapter": "Chapter ?", "is_correct": False}
-        state["series_context"] = "A manhwa story."
+    state["chapter_info"] = {
+        "title": title,
+        "chapter": chapter_label,
+        "season": season,
+        "is_correct": bool(chapter_num),
+    }
+    if not state.get("series_context"):
+        state["series_context"] = ""
 
     state["status"] = "CHAPTER_DETECTED"
+    update_job_status(state["job_id"], state["status"])
     return state
 
 
-
 def build_scenes_node(state: PipelineState) -> PipelineState:
-    print("buildinf scences .......")
-    """Group panels into scenes, skipping author‑notes / intro pages."""
     SKIP_KEYWORDS = [
         "author", "note", "credit", "disclaimer", "support the official",
         "read this from the official", "free release", "patreon",
@@ -188,7 +134,7 @@ def build_scenes_node(state: PipelineState) -> PipelineState:
     for i, ocr in enumerate(state["ocr_results"]):
         text = ocr["text"].lower()
         is_skip = any(keyword in text for keyword in SKIP_KEYWORDS)
-        if not text.strip() or text in ["", "44^^^44||"]: 
+        if not text.strip() or text in ["", "44^^^44||"]:
             is_skip = True
         if is_skip:
             scenes.append({
@@ -215,76 +161,73 @@ def build_scenes_node(state: PipelineState) -> PipelineState:
     update_job_status(state["job_id"], state["status"])
     return state
 
+
+def _build_panel_thumbnails(state: PipelineState, story_scenes: list[dict]) -> dict[str, bytes]:
+    from core.gemini_client import panel_thumbnail_jpeg
+
+    page_cache: dict[str, bytes] = {}
+    thumbnails: dict[str, bytes] = {}
+
+    for scene in story_scenes:
+        segment_id = scene["segment_id"]
+        panel_idx = scene["panels"][0]
+        if panel_idx >= len(state["panels"]):
+            continue
+        panel = state["panels"][panel_idx]
+        page_path = panel["page_path"]
+        if page_path not in page_cache:
+            page_cache[page_path] = supabase_admin.storage.from_("pages").download(page_path)
+        try:
+            thumbnails[segment_id] = panel_thumbnail_jpeg(
+                page_cache[page_path],
+                panel["bbox"],
+            )
+        except Exception as exc:
+            print(f"Thumbnail failed for {segment_id}: {exc}")
+
+    return thumbnails
+
+
 def generate_narration_node(state: PipelineState) -> PipelineState:
-    """Generate Hindi narration for each scene, with full story context."""
-    from groq import Groq
-    from core.config import settings
+    """Generate Hindi narration for all story scenes in batched Gemini Flash calls."""
+    from core.gemini_client import generate_narration_batch
 
-    client = Groq(api_key=settings.groq_api_key)
+    story_scenes = [
+        {
+            "scene_index": scene["scene_index"],
+            "segment_id": scene["segment_id"],
+            "text": scene["text"],
+        }
+        for scene in state["scenes"]
+        if scene.get("is_story") and scene.get("text", "").strip()
+    ]
 
-    series_context = state.get("series_context", "")
-    chapter = state.get("chapter_info", {}).get("chapter", "")
+    panel_thumbnails = _build_panel_thumbnails(state, story_scenes)
+    narration_by_id = generate_narration_batch(
+        series_context=state.get("series_context", ""),
+        chapter_info=state.get("chapter_info", {}),
+        story_scenes=story_scenes,
+        panel_thumbnails=panel_thumbnails,
+    )
 
     narrations = []
-    prev_text = ""   # only the last panel's narration
-
     for scene in state["scenes"]:
-        if not scene["is_story"] or not scene["text"].strip():
+        segment_id = scene["segment_id"]
+        if not scene.get("is_story") or not scene.get("text", "").strip():
             narrations.append({
                 "scene_index": scene["scene_index"],
-                "segment_id": scene["segment_id"],
+                "segment_id": segment_id,
                 "narration_text": "",
             })
             continue
 
-        ocr_text = scene["text"]
-
-        # For the first panel, optionally inject series context (intro)
-        if len(narrations) == 0 and series_context:
-            intro = f"Series background (use ONLY for the first sentence): {series_context}"
-        else:
-            intro = ""
-
-        prompt = f"""You are a Hindi YouTube storyteller narrating a manhwa panel.  
-Your style is energetic, conversational, and lightly humorous – like a friend explaining a cool comic.
-
-STRICT RULES:
-- Write exactly 2‑3 sentences of spoken Hindi based SOLELY on the given OCR text.
-- Describe what is happening in THIS panel – actions, dialogue, or visual cues from the OCR.
-- Add a tiny pinch of humour or an exaggerated reaction only if it fits naturally.
-- Never repeat anything from the previous panel's narration.
-- No stage directions, no brackets, pure spoken words.
-
-{intro}
-
-Previous panel's narration (just to avoid repetition): {prev_text[:80]}
-
-OCR text from THIS panel:
-{ocr_text}
-
-Hindi narration (only for this panel):"""
-
-
-        try:
-            response = client.chat.completions.create(
-            model="llama-3.1-8b-instant",
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.9,
-            max_tokens=200,
-        )
-        except Exception as e:
-            print(f"Narration generation failed: {e}")
-            raise
-        
-        narration_text = response.choices[0].message.content.strip()
-        narration_text = re.sub(r'\([^)]*\)', '', narration_text).strip()
-
+        narration_text = narration_by_id.get(segment_id, "").strip()
+        narration_text = re.sub(r"\([^)]*\)", "", narration_text).strip()
         narrations.append({
             "scene_index": scene["scene_index"],
-            "segment_id": scene["segment_id"],
-            "narration_text": narration_text
+            "segment_id": segment_id,
+            "narration_text": narration_text,
         })
-        prev_text = narration_text   # update for next iteration
 
     state["narration"] = narrations
     state["status"] = "SCRIPT_GENERATING"
@@ -292,12 +235,11 @@ Hindi narration (only for this panel):"""
     return state
 
 
-
 def synthesize_audio_node(state: PipelineState) -> PipelineState:
-    """Generate per-scene TTS and one correctly encoded master track."""
+    """Generate per-scene TTS in parallel and one correctly encoded master track."""
     import edge_tts
-    import io
     from pydub import AudioSegment
+    from core.config import settings
 
     async def generate_audio(text: str, voice: str = "hi-IN-SwaraNeural") -> bytes:
         communicate = edge_tts.Communicate(text, voice)
@@ -307,46 +249,53 @@ def synthesize_audio_node(state: PipelineState) -> PipelineState:
                 audio_bytes.write(chunk["data"])
         return audio_bytes.getvalue()
 
-    audio_urls = []
-    timings = []
-    master_audio = AudioSegment.empty()
+    async def synthesize_all() -> tuple[list[dict], list[dict], AudioSegment]:
+        semaphore = asyncio.Semaphore(settings.tts_concurrency)
+        audio_urls: list[dict] = []
+        timings: list[dict] = []
+        master_audio = AudioSegment.empty()
 
-    for narration_item in state["narration"]:
-        scene_idx = narration_item["scene_index"]
-        segment_id = narration_item.get("segment_id", f"scene_{scene_idx:04d}")
-        text = narration_item["narration_text"]
+        items = [item for item in state["narration"] if item.get("narration_text", "").strip()]
 
-        if not text.strip():
-            continue
+        async def fetch_tts(item: dict) -> tuple[dict, bytes]:
+            async with semaphore:
+                data = await generate_audio(item["narration_text"])
+            return item, data
 
-        audio_data = asyncio.run(generate_audio(text))
-        decoded_segment = AudioSegment.from_file(io.BytesIO(audio_data), format="mp3")
-        start_time = len(master_audio) / 1000.0
-        master_audio += decoded_segment
-        end_time = len(master_audio) / 1000.0
+        tts_results = await asyncio.gather(*[fetch_tts(item) for item in items])
 
-        storage_path = f"{state['job_id']}/audio/{segment_id}.mp3"
-        try:
-            supabase_admin.storage.from_("audio").upload(
-                path=storage_path,
-                file=audio_data,
-                file_options={"content-type": "audio/mpeg"},
-            )
-        except Exception as e:
-            if "Duplicate" not in str(e) and "409" not in str(e):
-                raise
+        for narration_item, audio_data in tts_results:
+            scene_idx = narration_item["scene_index"]
+            segment_id = narration_item.get("segment_id", f"scene_{scene_idx:04d}")
+            decoded_segment = AudioSegment.from_file(io.BytesIO(audio_data), format="mp3")
+            start_time = len(master_audio) / 1000.0
+            master_audio += decoded_segment
+            end_time = len(master_audio) / 1000.0
 
-        audio_urls.append({"segment_id": segment_id, "path": storage_path})
-        timings.append({
-            "segment_id": segment_id,
-            "scene_index": scene_idx,
-            "start_time": start_time,
-            "end_time": end_time,
-            "duration": end_time - start_time,
-        })
+            storage_path = f"{state['job_id']}/audio/{segment_id}.mp3"
+            try:
+                supabase_admin.storage.from_("audio").upload(
+                    path=storage_path,
+                    file=audio_data,
+                    file_options={"content-type": "audio/mpeg"},
+                )
+            except Exception as e:
+                if "Duplicate" not in str(e) and "409" not in str(e):
+                    raise
 
-    # Concatenate decoded audio and encode once. Joining MP3 bytes directly can
-    # add headers and encoder padding between scenes, causing timestamp drift.
+            audio_urls.append({"segment_id": segment_id, "path": storage_path})
+            timings.append({
+                "segment_id": segment_id,
+                "scene_index": scene_idx,
+                "start_time": start_time,
+                "end_time": end_time,
+                "duration": end_time - start_time,
+            })
+
+        return audio_urls, timings, master_audio
+
+    audio_urls, timings, master_audio = asyncio.run(synthesize_all())
+
     if len(master_audio) > 0:
         combined_buffer = io.BytesIO()
         master_audio.export(combined_buffer, format="mp3", bitrate="128k")
@@ -359,9 +308,7 @@ def synthesize_audio_node(state: PipelineState) -> PipelineState:
                 file_options={"content-type": "audio/mpeg"}
             )
         except Exception as e:
-            if "Duplicate" in str(e) or "409" in str(e):
-                pass
-            else:
+            if "Duplicate" not in str(e) and "409" not in str(e):
                 print(f"Failed to upload combined audio: {e}")
         state["combined_audio_path"] = combined_path
         state["combined_audio_url"] = ""
@@ -376,16 +323,13 @@ def synthesize_audio_node(state: PipelineState) -> PipelineState:
     return state
 
 
-
-
-# --- Graph construction ---
 def build_pipeline_graph():
     graph = StateGraph(PipelineState)
 
     graph.add_node("extract_pages", extract_pages_node)
     graph.add_node("detect_panels", detect_panels_node)
     graph.add_node("crop_and_ocr", crop_and_ocr_node)
-    graph.add_node("detect_chapter", detect_chapter_and_storyline_node)
+    graph.add_node("apply_chapter_metadata", apply_chapter_metadata_node)
     graph.add_node("build_scenes", build_scenes_node)
     graph.add_node("generate_narration", generate_narration_node)
     graph.add_node("synthesize_audio", synthesize_audio_node)
@@ -393,54 +337,16 @@ def build_pipeline_graph():
     graph.set_entry_point("extract_pages")
     graph.add_edge("extract_pages", "detect_panels")
     graph.add_edge("detect_panels", "crop_and_ocr")
-    graph.add_edge("crop_and_ocr", "detect_chapter")
-    graph.add_edge("detect_chapter", "build_scenes")
+    graph.add_edge("crop_and_ocr", "apply_chapter_metadata")
+    graph.add_edge("apply_chapter_metadata", "build_scenes")
     graph.add_edge("build_scenes", "generate_narration")
     graph.add_edge("generate_narration", "synthesize_audio")
     graph.add_edge("synthesize_audio", END)
 
     return graph.compile()
 
+
 def run_pipeline(state: PipelineState):
     graph = build_pipeline_graph()
     final_state = graph.invoke(state)
     return final_state
-
-# The describe_panels_node function is kept below but not used in the graph.
-# You may delete it entirely if you don't plan to use it again.
-
-def describe_panels_node(state: PipelineState) -> PipelineState:
-    """Use Groq Vision to describe each panel using base64 image data."""
-    from groq import Groq
-    from core.config import settings
-    import base64
-    from db.supabase_admin import supabase_admin
-
-    client = Groq(api_key=settings.groq_api_key)
-    descriptions = []
-
-    for panel in state["panels"]:
-        page_path = panel["page_path"]
-        img_bytes = supabase_admin.storage.from_("pages").download(page_path)
-        img_base64 = base64.b64encode(img_bytes).decode("utf-8")
-        image_data_url = f"data:image/png;base64,{img_base64}"
-
-        # This model may not be available – update if you find a working one.
-        response = client.chat.completions.create(
-            model="llava-v1.5-7b",   # NOT WORKING currently, kept for reference
-            messages=[{
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": "Describe this manhwa panel: who is in it, what are they doing, their expressions, and any important actions. 2-3 concise sentences."},
-                    {"type": "image_url", "image_url": {"url": image_data_url}}
-                ]
-            }],
-            max_tokens=200,
-            temperature=0.3
-        )
-        descriptions.append(response.choices[0].message.content.strip())
-
-    state["panel_descriptions"] = descriptions
-    state["status"] = "PANELS_DESCRIBED"
-    update_job_status(state["job_id"], state["status"])
-    return state

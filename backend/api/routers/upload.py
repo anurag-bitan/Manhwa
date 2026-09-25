@@ -24,7 +24,9 @@ class CreatePdfUploadRequest(BaseModel):
     content_type: str = Field(default="application/pdf", max_length=100)
     manhwa_name: str = Field(default="", max_length=200)
     genre: str = Field(default="", max_length=100)
+    season: str = Field(default="", max_length=50)
     chapter_number: str = Field(default="", max_length=50)
+    series_context: str = Field(default="", max_length=500)
 
 
 def _response_dict(response: object) -> dict:
@@ -83,7 +85,9 @@ async def create_pdf_upload(
         file_path,
         manhwa_name=request.manhwa_name,
         genre=request.genre,
+        season=request.season,
         chapter_number=request.chapter_number,
+        series_context=request.series_context,
     )
 
     try:
