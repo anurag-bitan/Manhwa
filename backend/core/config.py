@@ -7,6 +7,7 @@ class Settings(BaseSettings):
     supabase_service_role_key: str = ""
     firebase_project_id: str = ""
     firebase_service_account_json: str = ""
+    firebase_service_account_path: str = ""
     gemini_api_key: str = ""
     gemini_model: str = "gemini-2.5-flash"
     vertex_location: str = "europe-west1"

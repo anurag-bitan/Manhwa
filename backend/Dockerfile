@@ -26,7 +26,7 @@ RUN pip install --no-cache-dir -r requirements-worker.txt
 
 RUN pip install --no-cache-dir --default-timeout=300 paddlepaddle==2.6.2
 RUN pip install --no-cache-dir --default-timeout=300 paddleocr==2.7.3
-RUN python -c "from paddleocr import PaddleOCR; PaddleOCR(lang='en', show_log=False)"
+# OCR models download on first pipeline run (avoids flaky zlib errors during Render builds).
 
 COPY . .
 

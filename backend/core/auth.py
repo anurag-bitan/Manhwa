@@ -45,8 +45,11 @@ def _initialize_firebase() -> None:
             "FIREBASE_PROJECT_ID must be configured."
         )
     cred: Any
+    sa_path = settings.firebase_service_account_path.strip()
     sa_json = settings.firebase_service_account_json.strip()
-    if sa_json:
+    if sa_path:
+        cred = credentials.Certificate(sa_path)
+    elif sa_json:
         cred = credentials.Certificate(json.loads(sa_json))
     else:
         cred = credentials.ApplicationDefault()

@@ -12,6 +12,8 @@
 !.env.example
 *.pem
 *.key
+*firebase-adminsdk*.json
+*serviceAccount*.json
 /backend/deploy/*.env.yaml
 !/backend/deploy/*.env.yaml.example
 

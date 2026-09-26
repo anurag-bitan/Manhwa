@@ -85,6 +85,30 @@ Optional: `MAX_PDF_BYTES`, `GEMINI_MODEL`, quota vars — see [`backend/.env.exa
 
 Render sets **`PORT`** automatically; the Dockerfile binds `uvicorn` to `${PORT}`.
 
+### Firebase service account JSON (important)
+
+**Do not** commit the key file to GitHub or upload it into the Docker image.
+
+| Where | What to do |
+|-------|------------|
+| **Render (production)** | Paste the **entire JSON as one line** into the secret env var **`FIREBASE_SERVICE_ACCOUNT_JSON`**. There is no file path on Render. |
+| **Local `backend/.env`** | Either set **`FIREBASE_SERVICE_ACCOUNT_PATH`** to the full path of your `.json` file, **or** paste minified JSON into `FIREBASE_SERVICE_ACCOUNT_JSON`. |
+
+Example local path (your machine):
+
+```env
+FIREBASE_PROJECT_ID=manhwa-ai-509114
+FIREBASE_SERVICE_ACCOUNT_PATH=C:\Users\Anurag Bhattacharya\Downloads\manhwa-ai-509114-firebase-adminsdk-fbsvc-5179e0fa43.json
+```
+
+Generate the one-line value for Render:
+
+```powershell
+.\scripts\format-firebase-sa-for-render.ps1 -JsonPath "C:\path\to\manhwa-ai-509114-firebase-adminsdk-fbsvc-5179e0fa43.json"
+```
+
+**Render UI:** Dashboard → **manhwa-api** → **Environment** → add or edit **`FIREBASE_SERVICE_ACCOUNT_JSON`** (mark as secret) → paste the minified string → **Save Changes** (triggers redeploy).
+
 ### Verify backend
 
 ```powershell
