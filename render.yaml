@@ -1,5 +1,8 @@
 # Render Blueprint: connect repo at https://dashboard.render.com/blueprints
 # Docs: docs/RENDER_VERCEL.md
+#
+# Keep plan: free unless you upgrade in the dashboard. OCR + Paddle needs
+# more RAM than 512 MB; Starter (1c-2g) is the practical production size.
 services:
   - type: web
     name: manhwa-api
@@ -8,12 +11,27 @@ services:
     dockerContext: backend
     plan: free
     healthCheckPath: /health
-    autoDeploy: true
+    autoDeployTrigger: commit
+    maxShutdownDelaySeconds: 300
     envVars:
       - key: PIPELINE_EXECUTION_MODE
         value: local
       - key: PYTHONUNBUFFERED
         value: "1"
+      - key: WEB_CONCURRENCY
+        value: "1"
+      - key: GEMINI_MODEL
+        value: gemini-2.5-flash-lite
+      - key: NARRATION_PROVIDER
+        value: deepseek
+      - key: DEEPSEEK_API_BASE_URL
+        value: https://api.deepseek.com
+      - key: DEEPSEEK_MODEL
+        value: deepseek-chat
+      - key: NARRATION_BATCH_SIZE
+        value: "12"
+      - key: TTS_CONCURRENCY
+        value: "4"
       - key: SUPABASE_URL
         sync: false
       - key: SUPABASE_SERVICE_ROLE_KEY
@@ -24,7 +42,7 @@ services:
         sync: false
       - key: GEMINI_API_KEY
         sync: false
+      - key: DEEPSEEK_API_KEY
+        sync: false
       - key: CORS_ALLOWED_ORIGINS
         sync: false
-      - key: GEMINI_MODEL
-        value: gemini-2.5-flash

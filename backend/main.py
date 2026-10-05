@@ -34,7 +34,7 @@ app.include_router(context.router)
 async def root():
     return {"message": "Backend is running!"}
 
-@app.get("/health")
+@app.api_route("/health", methods=["GET", "HEAD"])
 async def health():
     return {"status": "ok"}
 

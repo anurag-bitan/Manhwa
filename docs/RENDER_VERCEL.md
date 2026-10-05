@@ -78,10 +78,13 @@ flowchart LR
 | `FIREBASE_PROJECT_ID` | Firebase project id |
 | `FIREBASE_SERVICE_ACCOUNT_JSON` | Single-line minified JSON |
 | `GEMINI_API_KEY` | Google AI Studio |
-| `CORS_ALLOWED_ORIGINS` | `https://your-app.vercel.app` (comma-separated, no trailing slashes) |
+| `DEEPSEEK_API_KEY` | Required for fast Hindi narration (matches local) |
+| `CORS_ALLOWED_ORIGINS` | Exact Vercel origin, e.g. `https://manhwa-five.vercel.app` (no trailing slash) |
 | `PIPELINE_EXECUTION_MODE` | `local` (set in `render.yaml` for Blueprint) |
 
 Optional: `MAX_PDF_BYTES`, `GEMINI_MODEL`, quota vars — see [`backend/.env.example`](../backend/.env.example).
+
+Do **not** put `SUPABASE_SERVICE_ROLE_KEY` on the Vercel project. That key belongs only on Render.
 
 Render sets **`PORT`** automatically; the Dockerfile binds `uvicorn` to `${PORT}`.
 
@@ -127,8 +130,8 @@ Environment variables (Production):
 
 | Variable | Value |
 |----------|--------|
-| `VITE_API_BASE_URL` | `https://manhwa-api.onrender.com` (your Render URL) |
-| `VITE_FIREBASE_*` | From Firebase console |
+| `VITE_API_BASE_URL` | `https://manhwa-api-vxci.onrender.com` (set on Production **and** Preview) |
+| `VITE_FIREBASE_*` | From Firebase console (include Preview, especially `VITE_FIREBASE_API_KEY`) |
 | `VITE_SUPABASE_URL` | Supabase URL |
 | `VITE_SUPABASE_ANON_KEY` | Anon key |
 

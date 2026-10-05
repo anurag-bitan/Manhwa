@@ -32,4 +32,5 @@ COPY . .
 
 EXPOSE 10000
 
-CMD ["sh", "-c", "uvicorn main:app --host 0.0.0.0 --port ${PORT}"]
+# One worker: the OCR pipeline is in-process. Extra workers OOM on Render.
+CMD ["sh", "-c", "uvicorn main:app --host 0.0.0.0 --port ${PORT} --workers 1 --proxy-headers --forwarded-allow-ips='*' --timeout-keep-alive 75"]
