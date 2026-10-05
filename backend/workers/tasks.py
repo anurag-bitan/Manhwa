@@ -1,8 +1,72 @@
 import logging
+import time
 
+from core.job_log import agent_debug_log
 from db.supabase_admin import supabase_admin
 
 logger = logging.getLogger(__name__)
+
+_detect_stats = {"pages": 0, "boxes": 0, "download_sec": 0.0, "cpu_sec": 0.0, "download_bytes": 0}
+_ocr_stats = {
+    "panels": 0,
+    "unique_pages": 0,
+    "download_sec": 0.0,
+    "ocr_sec": 0.0,
+    "download_bytes": 0,
+    "seen_pages": set(),
+}
+
+
+def reset_detect_stats() -> None:
+    _detect_stats.update(pages=0, boxes=0, download_sec=0.0, cpu_sec=0.0, download_bytes=0)
+
+
+def reset_ocr_stats() -> None:
+    _ocr_stats.update(
+        panels=0,
+        unique_pages=0,
+        download_sec=0.0,
+        ocr_sec=0.0,
+        download_bytes=0,
+        seen_pages=set(),
+    )
+
+
+def flush_detect_stats(job_id: str) -> None:
+    # #region agent log
+    agent_debug_log(
+        "H2",
+        "workers/tasks.py:detect_panels",
+        "panel detection storage vs cpu",
+        {
+            "job_id": job_id,
+            "pages": _detect_stats["pages"],
+            "boxes": _detect_stats["boxes"],
+            "download_sec": round(_detect_stats["download_sec"], 2),
+            "cpu_sec": round(_detect_stats["cpu_sec"], 2),
+            "download_bytes": _detect_stats["download_bytes"],
+        },
+    )
+    # #endregion
+
+
+def flush_ocr_stats(job_id: str) -> None:
+    # #region agent log
+    agent_debug_log(
+        "H2",
+        "workers/tasks.py:crop_and_ocr",
+        "ocr storage vs paddle",
+        {
+            "job_id": job_id,
+            "panels": _ocr_stats["panels"],
+            "unique_pages": _ocr_stats["unique_pages"],
+            "repeated_downloads": max(0, _ocr_stats["panels"] - _ocr_stats["unique_pages"]),
+            "download_sec": round(_ocr_stats["download_sec"], 2),
+            "ocr_sec": round(_ocr_stats["ocr_sec"], 2),
+            "download_bytes": _ocr_stats["download_bytes"],
+        },
+    )
+    # #endregion
 from storage3.exceptions import StorageApiError
 import pypdfium2 as pdfium
 from PIL import Image
@@ -152,16 +216,23 @@ def extract_pages(pdf_storage_path: str, job_id: str):
     )
 
     page_data_list = []
+    render_sec = 0.0
+    upload_sec = 0.0
+    total_bytes = 0
     for page_num in range(page_count):
         page = pdf[page_num]
+        render_started = time.perf_counter()
         bitmap = page.render(scale=2)
         pil_image = bitmap.to_pil()
 
         img_byte_arr = io.BytesIO()
         pil_image.save(img_byte_arr, format="PNG")
         img_bytes = img_byte_arr.getvalue()
+        render_sec += time.perf_counter() - render_started
+        total_bytes += len(img_bytes)
 
         storage_path = f"{job_id}/pages/page_{page_num:04d}.png"
+        upload_started = time.perf_counter()
         try:
             supabase_admin.storage.from_("pages").upload(
                 path=storage_path,
@@ -177,11 +248,28 @@ def extract_pages(pdf_storage_path: str, job_id: str):
                 )
             else:
                 raise
+        upload_sec += time.perf_counter() - upload_started
         # Persist object paths, not public URLs. The authenticated assets route
         # creates short-lived signed URLs after confirming job ownership.
         page_data_list.append({"path": storage_path})
 
     pdf.close()
+    # #region agent log
+    agent_debug_log(
+        "H3",
+        "workers/tasks.py:extract_pages",
+        "page render vs storage upload",
+        {
+            "job_id": job_id,
+            "pages": page_count,
+            "png_bytes": total_bytes,
+            "render_sec": round(render_sec, 2),
+            "upload_sec": round(upload_sec, 2),
+            "scale": 2,
+            "format": "PNG",
+        },
+    )
+    # #endregion
     logger.info(
         "[pipeline] job_id=%s task=extract_pages done uploaded_pages=%s",
         job_id,
@@ -192,7 +280,10 @@ def extract_pages(pdf_storage_path: str, job_id: str):
 
 def detect_panels(page_path: str, page_number: int):
     """Detect panels on any page layout (single, spread, partial spread)."""
+    download_started = time.perf_counter()
     img_bytes = supabase_admin.storage.from_("pages").download(page_path)
+    download_sec = time.perf_counter() - download_started
+    cpu_started = time.perf_counter()
     pil_img = Image.open(io.BytesIO(img_bytes)).convert('L')
     img = np.array(pil_img)
 
@@ -231,13 +322,20 @@ def detect_panels(page_path: str, page_number: int):
             all_boxes.extend(panel_rows)
 
     all_boxes.sort(key=lambda b: b[1])
+    _detect_stats["pages"] += 1
+    _detect_stats["boxes"] += len(all_boxes)
+    _detect_stats["download_sec"] += download_sec
+    _detect_stats["cpu_sec"] += time.perf_counter() - cpu_started
+    _detect_stats["download_bytes"] += len(img_bytes)
     return {"page_number": page_number, "boxes": all_boxes}
 
 
 def crop_and_ocr(panel_data: dict, panel_index: int):
     """Crop a panel and run OCR, returning extracted text."""
     page_path = panel_data["page_path"]
+    download_started = time.perf_counter()
     img_bytes = supabase_admin.storage.from_("pages").download(page_path)
+    download_sec = time.perf_counter() - download_started
     page_img = Image.open(io.BytesIO(img_bytes))
 
     x1, y1, x2, y2 = panel_data["bbox"]
@@ -253,7 +351,9 @@ def crop_and_ocr(panel_data: dict, panel_index: int):
     cropped_np = np.array(cropped)
 
     # Run PaddleOCR
+    ocr_started = time.perf_counter()
     result = get_ocr().ocr(cropped_np)
+    ocr_sec = time.perf_counter() - ocr_started
 
     # Extract text
     text = ""
@@ -261,6 +361,14 @@ def crop_and_ocr(panel_data: dict, panel_index: int):
         for line in result[0]:
             text += line[1][0] + " "
     text = text.strip()
+
+    _ocr_stats["panels"] += 1
+    if page_path not in _ocr_stats["seen_pages"]:
+        _ocr_stats["seen_pages"].add(page_path)
+        _ocr_stats["unique_pages"] += 1
+    _ocr_stats["download_sec"] += download_sec
+    _ocr_stats["ocr_sec"] += ocr_sec
+    _ocr_stats["download_bytes"] += len(img_bytes)
 
     return {
         "panel_index": panel_index,

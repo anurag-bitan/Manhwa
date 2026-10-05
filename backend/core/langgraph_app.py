@@ -8,6 +8,7 @@ import io
 import time
 from functools import wraps
 
+from core.job_log import agent_debug_log
 from core.narration_prompt import assemble_story_summary
 
 logger = logging.getLogger(__name__)
@@ -46,8 +47,9 @@ def extract_pages_node(state: PipelineState) -> PipelineState:
     return state
 
 def detect_panels_node(state: PipelineState) -> PipelineState:
-    from workers.tasks import detect_panels
+    from workers.tasks import detect_panels, flush_detect_stats, reset_detect_stats
 
+    reset_detect_stats()
     panels_all = [
         detect_panels(page["path"], i)
         for i, page in enumerate(state["page_urls"])
@@ -76,6 +78,7 @@ def detect_panels_node(state: PipelineState) -> PipelineState:
     state["panels"] = all_panels
     state["status"] = "PANELS_DETECTED"
     update_job_status(state["job_id"], state["status"])
+    flush_detect_stats(state["job_id"])
     return state
 
 
@@ -83,8 +86,16 @@ def update_job_status(job_id: str, status: str):
     try:
         supabase_admin.table("processing_jobs").update({"status": status}).eq("id", job_id).execute()
         logger.debug("[pipeline] job_id=%s db status=%s", job_id, status)
-    except Exception:
+    except Exception as exc:
         logger.exception("[pipeline] job_id=%s failed to update status=%s", job_id, status)
+        # #region agent log
+        agent_debug_log(
+            "H5",
+            "core/langgraph_app.py:update_job_status",
+            "status update failed",
+            {"job_id": job_id, "status": status, "error_type": type(exc).__name__},
+        )
+        # #endregion
 
 
 def _node_result_summary(node_name: str, state: PipelineState) -> str:
@@ -126,6 +137,20 @@ def _wrap_pipeline_node(node_name: str, fn: Callable[[PipelineState], PipelineSt
                 elapsed,
                 _node_result_summary(node_name, new_state),
             )
+            # #region agent log
+            agent_debug_log(
+                "H1" if node_name == "crop_and_ocr" else "H4",
+                "core/langgraph_app.py:node",
+                "pipeline node done",
+                {
+                    "job_id": job_id,
+                    "node": node_name,
+                    "elapsed_sec": round(elapsed, 2),
+                    "status": new_state.get("status"),
+                    "summary": _node_result_summary(node_name, new_state),
+                },
+            )
+            # #endregion
             return new_state
         except Exception:
             elapsed = time.perf_counter() - started
@@ -141,8 +166,9 @@ def _wrap_pipeline_node(node_name: str, fn: Callable[[PipelineState], PipelineSt
 
 
 def crop_and_ocr_node(state: PipelineState) -> PipelineState:
-    from workers.tasks import crop_and_ocr
+    from workers.tasks import crop_and_ocr, flush_ocr_stats, reset_ocr_stats
 
+    reset_ocr_stats()
     ocr_results = [
         crop_and_ocr(panel, idx)
         for idx, panel in enumerate(state["panels"])
@@ -150,6 +176,7 @@ def crop_and_ocr_node(state: PipelineState) -> PipelineState:
 
     ocr_results.sort(key=lambda x: x["panel_index"])
     state["ocr_results"] = ocr_results
+    flush_ocr_stats(state["job_id"])
     state["status"] = "OCR_COMPLETED"
     update_job_status(state["job_id"], state["status"])
     return state

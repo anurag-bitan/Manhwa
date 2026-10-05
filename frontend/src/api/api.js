@@ -153,10 +153,30 @@ export const generateAudioStory = async ({
   return { task_id: started.job_id };
 };
 
+let lastLoggedStatus = "";
+
 export const checkTaskStatus = async (taskId) => {
   const encodedTaskId = encodeURIComponent(taskId);
   const job = await authenticatedFetch(`/jobs/${encodedTaskId}`);
   const status = job.status;
+  if (status !== lastLoggedStatus) {
+    lastLoggedStatus = status;
+    // #region agent log
+    fetch("http://127.0.0.1:7797/ingest/61674434-9d7d-4af7-92ff-ec7784e4acf8", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "274e57" },
+      body: JSON.stringify({
+        sessionId: "274e57",
+        runId: "pre-fix",
+        hypothesisId: "H1",
+        location: "frontend/src/api/api.js:checkTaskStatus",
+        message: "job status polled",
+        data: { status },
+        timestamp: Date.now(),
+      }),
+    }).catch(() => {});
+    // #endregion
+  }
 
   if (status === "TTS_COMPLETED") {
     const assets = await authenticatedFetch(`/jobs/${encodedTaskId}/assets`);
