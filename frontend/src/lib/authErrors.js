@@ -42,7 +42,7 @@ const AUTH_ERROR_COPY = {
   "auth/unauthorized-domain": {
     title: "Domain not allowed",
     message:
-      "This site URL is not authorized in Firebase. Add localhost (or 127.0.0.1) under Authentication → Settings → Authorized domains.",
+      "This site hostname is not authorized in Firebase. Add it under Authentication → Settings → Authorized domains (no https://).",
   },
   "auth/invalid-api-key": {
     title: "Invalid Firebase API key",
@@ -87,6 +87,14 @@ export function normalizeAuthError(error, options = {}) {
 
   const configured = AUTH_ERROR_COPY[code];
   if (configured) {
+    if (code === "auth/unauthorized-domain" && typeof window !== "undefined") {
+      const host = window.location.hostname;
+      return {
+        code,
+        ...configured,
+        message: `Add "${host}" in Firebase Console → Authentication → Settings → Authorized domains. Do not include https://.`,
+      };
+    }
     return { code, ...configured };
   }
 

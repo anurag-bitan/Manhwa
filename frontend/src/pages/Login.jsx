@@ -61,6 +61,14 @@ const AuthAlert = ({ error, onAction, onDismiss }) => {
           <p className="mt-1 text-sm leading-5 text-red-200/90">
             {error.message}
           </p>
+          {typeof window !== "undefined" &&
+            (error.code === "auth/unauthorized-domain" ||
+              /domain not allowed/i.test(error.title || "")) && (
+              <p className="mt-2 text-xs text-red-100/80">
+                Hostname to add:{" "}
+                <span className="font-mono">{window.location.hostname}</span>
+              </p>
+            )}
           {error.action && error.actionLabel && (
             <button
               type="button"
