@@ -8,10 +8,8 @@ import Footer from "../layout/Footer";
 import ScrollToTop from "../components/ScrollonTop";
 import DocumentationPage from "../pages/Documentation";
 
-
 import HomePage from "../pages/Home";
 import UploadPage from "../pages/Upload";
-import AuthCallback from "../components/auth/AuthCallback";
 import ProtectedRoute from "../components/auth/ProtectedRoute";
 import NotFoundPage from "../pages/NotFound";
 // Lazy-loaded pages
@@ -23,8 +21,7 @@ const LoginPage = lazy(() => import("../pages/Login"));
 const Layout = ({ children }) => {
   const location = useLocation();
 
-  // CHANGED: Added /auth/callback to hide layout routes
-  const hideLayoutRoutes = ["/login", "/signup", "/auth/callback"];
+  const hideLayoutRoutes = ["/login", "/signup"];
   const hideLayout = hideLayoutRoutes.includes(location.pathname);
 
   return (
@@ -94,9 +91,6 @@ const Routing = () => {
             </Suspense>
           }
         />
-
-        {/* AUTH CALLBACK - No Layout */}
-        <Route path="/auth/callback" element={<AuthCallback />} />
 
         {/* 404 - CATCH ALL */}
         <Route

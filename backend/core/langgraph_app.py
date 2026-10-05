@@ -1,9 +1,16 @@
 from langgraph.graph import StateGraph, END
-from typing import TypedDict, List, Optional
+from typing import TypedDict, List, Optional, Callable
 from db.supabase_admin import supabase_admin
 import asyncio
+import logging
 import re
 import io
+import time
+from functools import wraps
+
+from core.narration_prompt import assemble_story_summary
+
+logger = logging.getLogger(__name__)
 
 class PipelineState(TypedDict):
     job_id: str
@@ -75,8 +82,62 @@ def detect_panels_node(state: PipelineState) -> PipelineState:
 def update_job_status(job_id: str, status: str):
     try:
         supabase_admin.table("processing_jobs").update({"status": status}).eq("id", job_id).execute()
-    except Exception as e:
-        print(f"Failed to update job status: {e}")
+        logger.debug("[pipeline] job_id=%s db status=%s", job_id, status)
+    except Exception:
+        logger.exception("[pipeline] job_id=%s failed to update status=%s", job_id, status)
+
+
+def _node_result_summary(node_name: str, state: PipelineState) -> str:
+    if node_name == "extract_pages":
+        return f"pages={len(state.get('page_urls') or [])}"
+    if node_name == "detect_panels":
+        return f"panels={len(state.get('panels') or [])}"
+    if node_name == "crop_and_ocr":
+        return f"ocr_results={len(state.get('ocr_results') or [])}"
+    if node_name == "build_scenes":
+        scenes = state.get("scenes") or []
+        story = sum(1 for s in scenes if s.get("is_story"))
+        return f"scenes={len(scenes)} story_scenes={story}"
+    if node_name == "generate_narration":
+        narr = state.get("narration") or []
+        with_text = sum(1 for n in narr if (n.get("narration_text") or "").strip())
+        return f"narration_segments={len(narr)} with_text={with_text}"
+    if node_name == "synthesize_audio":
+        return (
+            f"audio_clips={len(state.get('audio_urls') or [])} "
+            f"combined={'yes' if state.get('combined_audio_path') else 'no'}"
+        )
+    return f"status={state.get('status')}"
+
+
+def _wrap_pipeline_node(node_name: str, fn: Callable[[PipelineState], PipelineState]):
+    @wraps(fn)
+    def wrapper(state: PipelineState) -> PipelineState:
+        job_id = state.get("job_id", "unknown")
+        logger.info("[pipeline] job_id=%s node=%s event=start", job_id, node_name)
+        started = time.perf_counter()
+        try:
+            new_state = fn(state)
+            elapsed = time.perf_counter() - started
+            logger.info(
+                "[pipeline] job_id=%s node=%s event=done elapsed_sec=%.2f %s",
+                job_id,
+                node_name,
+                elapsed,
+                _node_result_summary(node_name, new_state),
+            )
+            return new_state
+        except Exception:
+            elapsed = time.perf_counter() - started
+            logger.exception(
+                "[pipeline] job_id=%s node=%s event=failed elapsed_sec=%.2f",
+                job_id,
+                node_name,
+                elapsed,
+            )
+            raise
+
+    return wrapper
 
 
 def crop_and_ocr_node(state: PipelineState) -> PipelineState:
@@ -170,7 +231,10 @@ def _build_panel_thumbnails(state: PipelineState, story_scenes: list[dict]) -> d
 
     for scene in story_scenes:
         segment_id = scene["segment_id"]
-        panel_idx = scene["panels"][0]
+        panel_ids = scene.get("panels") or []
+        if not panel_ids:
+            continue
+        panel_idx = panel_ids[0]
         if panel_idx >= len(state["panels"]):
             continue
         panel = state["panels"][panel_idx]
@@ -182,27 +246,38 @@ def _build_panel_thumbnails(state: PipelineState, story_scenes: list[dict]) -> d
                 page_cache[page_path],
                 panel["bbox"],
             )
-        except Exception as exc:
-            print(f"Thumbnail failed for {segment_id}: {exc}")
+        except Exception:
+            logger.warning(
+                "[pipeline] job_id=%s node=generate_narration thumbnail_failed segment_id=%s",
+                state.get("job_id"),
+                segment_id,
+                exc_info=True,
+            )
 
     return thumbnails
 
 
 def generate_narration_node(state: PipelineState) -> PipelineState:
-    """Generate Hindi narration for all story scenes in batched Gemini Flash calls."""
-    from core.gemini_client import generate_narration_batch
+    """Generate Hindi narration for story scenes (DeepSeek text or Gemini + thumbnails)."""
+    from core.config import settings
+    from core.narration import generate_narration_batch
 
     story_scenes = [
         {
             "scene_index": scene["scene_index"],
             "segment_id": scene["segment_id"],
             "text": scene["text"],
+            "panels": scene.get("panels") or [],
         }
         for scene in state["scenes"]
         if scene.get("is_story") and scene.get("text", "").strip()
     ]
 
-    panel_thumbnails = _build_panel_thumbnails(state, story_scenes)
+    panel_thumbnails = (
+        _build_panel_thumbnails(state, story_scenes)
+        if settings.narration_backend == "gemini"
+        else {}
+    )
     narration_by_id = generate_narration_batch(
         series_context=state.get("series_context", ""),
         chapter_info=state.get("chapter_info", {}),
@@ -230,6 +305,7 @@ def generate_narration_node(state: PipelineState) -> PipelineState:
         })
 
     state["narration"] = narrations
+    state["story_summary"] = assemble_story_summary(narrations)
     state["status"] = "SCRIPT_GENERATING"
     update_job_status(state["job_id"], state["status"])
     return state
@@ -326,13 +402,17 @@ def synthesize_audio_node(state: PipelineState) -> PipelineState:
 def build_pipeline_graph():
     graph = StateGraph(PipelineState)
 
-    graph.add_node("extract_pages", extract_pages_node)
-    graph.add_node("detect_panels", detect_panels_node)
-    graph.add_node("crop_and_ocr", crop_and_ocr_node)
-    graph.add_node("apply_chapter_metadata", apply_chapter_metadata_node)
-    graph.add_node("build_scenes", build_scenes_node)
-    graph.add_node("generate_narration", generate_narration_node)
-    graph.add_node("synthesize_audio", synthesize_audio_node)
+    nodes = {
+        "extract_pages": extract_pages_node,
+        "detect_panels": detect_panels_node,
+        "crop_and_ocr": crop_and_ocr_node,
+        "apply_chapter_metadata": apply_chapter_metadata_node,
+        "build_scenes": build_scenes_node,
+        "generate_narration": generate_narration_node,
+        "synthesize_audio": synthesize_audio_node,
+    }
+    for name, fn in nodes.items():
+        graph.add_node(name, _wrap_pipeline_node(name, fn))
 
     graph.set_entry_point("extract_pages")
     graph.add_edge("extract_pages", "detect_panels")

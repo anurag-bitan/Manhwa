@@ -50,9 +50,11 @@ async function authenticatedFetch(path, options = {}) {
   const headers = new Headers(options.headers);
   headers.set("Authorization", `Bearer ${await getIdToken()}`);
 
+  const { signal, ...rest } = options;
   const response = await fetch(`${API_URL}${path}`, {
-    ...options,
+    ...rest,
     headers,
+    signal,
   });
   const payload = await parseResponse(response);
 
@@ -68,6 +70,7 @@ export const previewManhwaContext = async ({
   season = "",
   chapterNumber = "",
   genre = "",
+  signal,
 }) => {
   if (!manhwaName?.trim()) {
     return { context: "", grounded: false, word_count: 0 };
@@ -82,6 +85,7 @@ export const previewManhwaContext = async ({
       chapter_number: chapterNumber.trim(),
       genre: genre.trim(),
     }),
+    signal,
   });
 };
 

@@ -20,7 +20,7 @@ async def preview_context(
     request: ContextPreviewRequest,
     _current_user: AuthenticatedUser = Depends(get_current_user),
 ):
-    """Prefetch a short search-grounded manhwa blurb (max 50 words)."""
+    """Prefetch a search-grounded series or chapter summary (up to 600 words)."""
     result = fetch_grounded_context(
         request.manhwa_name,
         season=request.season,

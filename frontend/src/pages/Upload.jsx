@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect } from "react";
+import React, { useState, useRef, useEffect, useMemo } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import { useAuth } from "../context/useAuth";
 import { showToast } from "../utils/toast";
@@ -22,6 +22,8 @@ import {
 
 import { ApiError, generateAudioStory, checkTaskStatus, previewManhwaContext } from '../api/api';
 import { generateVideoFromScenes } from '../utils/videoMaker';
+import PanelPreviewGrid from "../components/PanelPreviewGrid";
+import { buildPanelCards } from "../utils/panelCards";
 
 const configuredMaxPdfMb = Number(import.meta.env.VITE_MAX_PDF_MB || 50);
 const MAX_PDF_MB = Number.isFinite(configuredMaxPdfMb) && configuredMaxPdfMb > 0
@@ -57,10 +59,17 @@ const UploadPage = () => {
   const videoContainerRef = useRef(null);
   const videoRef = useRef(null);
   const contextDebounceRef = useRef(null);
+  const contextAbortRef = useRef(null);
 
   const navigate = useNavigate();
   const location = useLocation();
   const { user, logout } = useAuth();
+
+  const panelCards = useMemo(
+    () => buildPanelCards(storyData, panelImages),
+    [storyData, panelImages],
+  );
+  const chapterStory = (storyData?.story_summary || "").trim();
 
   // Restore session data on mount
   useEffect(() => {
@@ -108,6 +117,10 @@ const UploadPage = () => {
     if (contextDebounceRef.current) {
       clearTimeout(contextDebounceRef.current);
     }
+    if (contextAbortRef.current) {
+      contextAbortRef.current.abort();
+      contextAbortRef.current = null;
+    }
 
     const trimmedName = mangaName.trim();
     if (!trimmedName || trimmedName.length < 2) {
@@ -118,6 +131,8 @@ const UploadPage = () => {
     }
 
     setContextLoading(true);
+    const controller = new AbortController();
+    contextAbortRef.current = controller;
     contextDebounceRef.current = setTimeout(async () => {
       try {
         const preview = await previewManhwaContext({
@@ -125,11 +140,17 @@ const UploadPage = () => {
           season,
           chapterNumber,
           genre,
+          signal: controller.signal,
         });
+        if (controller.signal.aborted) return;
         setSeriesContext(preview.context || "");
         setContextGrounded(Boolean(preview.grounded));
       } catch (err) {
+        if (err?.name === "AbortError" || controller.signal.aborted) return;
         if (err instanceof ApiError && err.status === 401) {
+          showToast.error(
+            "The API rejected your login token. Sign in again, or check Firebase service account config on the backend.",
+          );
           await logout().catch(() => {});
           navigate("/login", {
             replace: true,
@@ -137,10 +158,10 @@ const UploadPage = () => {
           });
           return;
         }
-        setSeriesContext("");
-        setContextGrounded(false);
       } finally {
-        setContextLoading(false);
+        if (!controller.signal.aborted) {
+          setContextLoading(false);
+        }
       }
     }, 600);
 
@@ -148,6 +169,7 @@ const UploadPage = () => {
       if (contextDebounceRef.current) {
         clearTimeout(contextDebounceRef.current);
       }
+      controller.abort();
     };
   }, [mangaName, season, chapterNumber, genre, logout, navigate, location.pathname]);
 
@@ -363,6 +385,7 @@ const UploadPage = () => {
             }
             const images = finalResult.image_urls || finalResult.panel_images || [];
             setPanelImages(images);
+            const panelCount = (finalResult.final_video_segments || []).length || images.length;
 
             // Save to session
             sessionStorage.setItem("pendingStory", JSON.stringify(finalResult));
@@ -372,7 +395,7 @@ const UploadPage = () => {
               setIsProcessing(false);
             }, 500);
 
-            showToast.successLong(`Story Ready! ${images.length} panels, ${finalResult.total_duration}s duration. Click "Generate Video" to create final video!`);
+            showToast.successLong(`Story Ready! ${panelCount} panels, ${finalResult.total_duration}s duration. Click "Generate Video" to create final video!`);
           }
           else if (statusData.state === 'FAILURE') {
             hasCompleted = true; // Mark as completed immediately
@@ -413,13 +436,16 @@ const UploadPage = () => {
       setProgress(0);
       showToast.error(err.message || "Story generation failed");
 
-      if (err instanceof ApiError && err.status === 401) {
-        await logout().catch(() => {});
-        navigate("/login", {
-          replace: true,
-          state: { from: { pathname: location.pathname } },
-        });
-      }
+        if (err instanceof ApiError && err.status === 401) {
+          showToast.error(
+            "The API rejected your login token. Sign in again, or check Firebase service account config on the backend.",
+          );
+          await logout().catch(() => {});
+          navigate("/login", {
+            replace: true,
+            state: { from: { pathname: location.pathname } },
+          });
+        }
     }
   };
 
@@ -736,7 +762,7 @@ const UploadPage = () => {
           )}
 
           {/* Extracted panels */}
-          {!isProcessing && panelImages.length > 0 && (
+          {!isProcessing && panelCards.length > 0 && (
             <div className="mt-4 sm:mt-5 md:mt-6 bg-gray-900/30 backdrop-blur-sm p-3 sm:p-4 md:p-6 rounded-xl sm:rounded-2xl border border-purple-500/20">
               <div className="flex items-center justify-between mb-3 sm:mb-4 md:mb-5 gap-2">
                 <h3 className="font-semibold text-sm sm:text-base md:text-lg flex items-center gap-1.5 sm:gap-2 min-w-0">
@@ -744,29 +770,18 @@ const UploadPage = () => {
                   <span className="truncate">Extracted Panels</span>
                 </h3>
                 <span className="px-2 sm:px-2.5 md:px-3 py-0.5 sm:py-1 bg-purple-500/10 rounded-full text-xs sm:text-sm text-purple-300 border border-purple-500/20 whitespace-nowrap flex-shrink-0">
-                  {panelImages.length} panel{panelImages.length !== 1 ? 's' : ''}
+                  {panelCards.length} panel{panelCards.length !== 1 ? 's' : ''}
                 </span>
               </div>
-              <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 xl:grid-cols-5 gap-2 sm:gap-3 md:gap-4">
-                {panelImages.map((url, idx) => (
-                  <div key={idx} className="relative group">
-                    <img
-                      src={url}
-                      alt={`panel-${idx}`}
-                      crossOrigin="anonymous"
-                      referrerPolicy="no-referrer"
-                      className="w-full h-28 sm:h-32 md:h-40 lg:h-48 object-cover rounded-lg sm:rounded-xl border border-purple-500/20 group-hover:scale-105 transition-all shadow-lg"
-                      onError={(e) => {
-                        console.warn("Failed to load image:", url);
-                        e.target.style.opacity = 0.5;
-                      }}
-                    />
-                    <div className="absolute inset-0 bg-gradient-to-t from-black/50 to-transparent opacity-0 group-hover:opacity-100 transition-opacity rounded-lg sm:rounded-xl flex items-end justify-center pb-1.5 sm:pb-2">
-                      <span className="text-xs text-white font-medium">Panel {idx + 1}</span>
-                    </div>
-                  </div>
-                ))}
-              </div>
+              <p className="text-xs text-gray-400 mb-3">Click a panel to preview the exact crop.</p>
+              <PanelPreviewGrid cards={panelCards} />
+            </div>
+          )}
+
+          {!isProcessing && chapterStory && (
+            <div className="mt-4 sm:mt-5 md:mt-6 bg-gray-900/30 backdrop-blur-sm p-3 sm:p-4 md:p-6 rounded-xl sm:rounded-2xl border border-purple-500/20">
+              <h3 className="font-semibold text-sm sm:text-base md:text-lg mb-2">Chapter Story</h3>
+              <p className="text-sm text-gray-200 leading-relaxed whitespace-pre-wrap">{chapterStory}</p>
             </div>
           )}
 
@@ -830,12 +845,18 @@ const UploadPage = () => {
             {(contextLoading || seriesContext) && (
               <div className="rounded-lg border border-purple-500/20 bg-purple-500/5 p-3">
                 <p className="text-xs font-medium text-purple-300 mb-1">
-                  {contextLoading ? "Fetching series context..." : "Series context (max 50 words)"}
-                </p>
-                <p className="text-xs text-gray-300 leading-relaxed">
                   {contextLoading
-                    ? "Searching trusted sources..."
-                    : seriesContext || "No grounded context found. Story will use PDF panels only."}
+                    ? seriesContext
+                      ? "Updating context..."
+                      : "Fetching series context..."
+                    : "Story context"}
+                </p>
+                <p className="text-xs text-gray-300 leading-relaxed whitespace-pre-wrap">
+                  {seriesContext
+                    ? seriesContext
+                    : contextLoading
+                      ? "Searching the web and model knowledge..."
+                      : "No context found. Story will use PDF panels only."}
                 </p>
                 {!contextLoading && seriesContext && (
                   <p className="text-[10px] text-gray-500 mt-1">

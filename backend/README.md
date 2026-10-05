@@ -19,3 +19,5 @@ docker compose up --build
 ```
 
 API on `http://localhost:8000`.
+
+`docker-compose.yml` mounts `FIREBASE_SERVICE_ACCOUNT_PATH` from `.env` (your host JSON file) into the container at `/run/secrets/firebase-sa.json`. Without this mount, API calls return **401** and the upload page sends you back to login.

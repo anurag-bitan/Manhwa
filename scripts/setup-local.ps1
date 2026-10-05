@@ -22,5 +22,8 @@ if (-not (Test-Path (Join-Path $Frontend ".env"))) {
     Write-Host "Created frontend/.env — add Firebase + VITE_SUPABASE_ANON_KEY." -ForegroundColor Yellow
 }
 
-Write-Host "Start API: cd backend; docker compose up --build"
+Write-Host "Start API + pipeline (recommended): cd backend; docker compose up --build"
+Write-Host "  Add GEMINI_API_KEY to backend/.env for OCR/narration/TTS."
 Write-Host "Start UI:  cd frontend; npm run dev"
+Write-Host ""
+Write-Host "Plain uvicorn on Windows only runs the API shell — PDF upload works but processing needs Docker or Linux worker deps."

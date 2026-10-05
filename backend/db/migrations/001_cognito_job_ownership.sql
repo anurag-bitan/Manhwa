@@ -1,8 +1,6 @@
 begin;
 
--- The API stores the immutable Cognito `sub` claim on every new job and
--- includes it in all user-facing reads. Existing rows remain nullable and are
--- intentionally inaccessible through the new authenticated API.
+-- Firebase uid is stored in cognito_sub (legacy column name). Do not rename.
 alter table public.processing_jobs
     add column if not exists cognito_sub text;
 

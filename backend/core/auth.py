@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from functools import lru_cache
 import json
 import logging
+import os
 from typing import Any
 
 import firebase_admin
@@ -48,6 +49,10 @@ def _initialize_firebase() -> None:
     sa_path = settings.firebase_service_account_path.strip()
     sa_json = settings.firebase_service_account_json.strip()
     if sa_path:
+        if not os.path.isfile(sa_path):
+            raise AuthenticationConfigurationError(
+                f"FIREBASE_SERVICE_ACCOUNT_PATH file not found: {sa_path}"
+            )
         cred = credentials.Certificate(sa_path)
     elif sa_json:
         cred = credentials.Certificate(json.loads(sa_json))
@@ -95,7 +100,10 @@ async def get_current_user(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Authentication service is not configured",
         )
+    except ValueError:
+        raise _unauthorized()
     except Exception:
+        logger.exception("Firebase ID token verification failed")
         raise _unauthorized()
 
     subject = str(claims.get("uid") or claims.get("sub") or "")

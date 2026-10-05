@@ -39,6 +39,21 @@ const AUTH_ERROR_COPY = {
     title: "Google sign-in is unavailable",
     message: "Google sign-in has not been configured for this environment yet.",
   },
+  "auth/unauthorized-domain": {
+    title: "Domain not allowed",
+    message:
+      "This site URL is not authorized in Firebase. Add localhost (or 127.0.0.1) under Authentication → Settings → Authorized domains.",
+  },
+  "auth/invalid-api-key": {
+    title: "Invalid Firebase API key",
+    message:
+      "VITE_FIREBASE_API_KEY is wrong or revoked. Copy the Web API key from Firebase Console → Project settings → Your apps, then update frontend/.env and restart npm run dev.",
+  },
+  "auth/api-key-not-valid.-please-pass-a-valid-api-key.": {
+    title: "Invalid Firebase API key",
+    message:
+      "VITE_FIREBASE_API_KEY is wrong or revoked. Copy the Web API key from Firebase Console → Project settings → Your apps, then update frontend/.env and restart npm run dev.",
+  },
 };
 
 export function getAuthErrorName(error) {
@@ -55,6 +70,18 @@ export function normalizeAuthError(error, options = {}) {
       code: "NetworkError",
       title: "Connection problem",
       message: "Check your internet connection and try again.",
+    };
+  }
+
+  if (
+    /api key not valid|invalid-api-key|API_KEY_INVALID/i.test(rawMessage) ||
+    /Unsafe attempt to load URL.*firebaseapp\.com/i.test(rawMessage)
+  ) {
+    return {
+      code: "auth/invalid-api-key",
+      title: "Invalid Firebase API key",
+      message:
+        "Your Firebase Web API key is missing, revoked, or restricted. In Firebase Console → Project settings → Your apps, copy apiKey into VITE_FIREBASE_API_KEY (and Vercel env vars), then restart the dev server.",
     };
   }
 

@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
 import { useAuth } from "../context/useAuth";
 import { useNavigate, useLocation } from "react-router-dom";
 import {
@@ -85,8 +85,16 @@ const AuthAlert = ({ error, onAction, onDismiss }) => {
 };
 
 const Login = () => {
-  const { signInWithEmail, signUpWithEmail, signInWithGoogle, googleEnabled } =
-    useAuth();
+  const {
+    user,
+    loading: authLoading,
+    signInWithEmail,
+    signUpWithEmail,
+    signInWithGoogle,
+    googleEnabled,
+    googleRedirectError,
+    clearGoogleRedirectError,
+  } = useAuth();
   const navigate = useNavigate();
   const location = useLocation();
 
@@ -100,6 +108,18 @@ const Login = () => {
     resolveRedirect(location.state?.from) ||
     resolveRedirect(readSavedRedirect()) ||
     "/upload";
+
+  useEffect(() => {
+    if (authLoading || !user) return;
+    sessionStorage.removeItem("auth_redirect");
+    navigate(from, { replace: true });
+  }, [authLoading, user, from, navigate]);
+
+  useEffect(() => {
+    if (!googleRedirectError || user) return;
+    setError(googleRedirectError);
+    clearGoogleRedirectError();
+  }, [googleRedirectError, clearGoogleRedirectError, user]);
 
   const changeAuthMode = (nextMode) => {
     setAuthMode(nextMode);
@@ -158,7 +178,6 @@ const Login = () => {
         showToast.success(
           authMode === "signIn" ? "Signed in successfully." : "Account created.",
         );
-        navigate(from, { replace: true });
       }
     } catch (err) {
       setError(
@@ -173,6 +192,7 @@ const Login = () => {
   };
 
   const handleGoogleSignIn = async () => {
+    let redirecting = false;
     try {
       setLoading(true);
       setError(null);
@@ -187,7 +207,13 @@ const Login = () => {
         }),
       );
 
-      const { data, error: authError } = await signInWithGoogle();
+      const { data, error: authError, redirecting: isRedirecting } =
+        await signInWithGoogle();
+
+      if (isRedirecting) {
+        redirecting = true;
+        return;
+      }
 
       if (authError) {
         setError(authError);
@@ -196,7 +222,6 @@ const Login = () => {
 
       if (data?.session) {
         showToast.success("Signed in with Google.");
-        navigate(from, { replace: true });
       }
     } catch (err) {
       setError(
@@ -206,9 +231,19 @@ const Login = () => {
         ),
       );
     } finally {
-      setLoading(false);
+      if (!redirecting) {
+        setLoading(false);
+      }
     }
   };
+
+  if (authLoading) {
+    return (
+      <div className="min-h-screen flex items-center justify-center p-4">
+        <Loader2 className="h-10 w-10 animate-spin text-purple-400" aria-label="Loading session" />
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-screen flex items-center justify-center p-4 relative overflow-hidden">

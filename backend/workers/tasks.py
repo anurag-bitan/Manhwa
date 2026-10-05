@@ -1,4 +1,8 @@
+import logging
+
 from db.supabase_admin import supabase_admin
+
+logger = logging.getLogger(__name__)
 from storage3.exceptions import StorageApiError
 import pypdfium2 as pdfium
 from PIL import Image
@@ -15,9 +19,9 @@ _ocr = None
 def get_ocr():
     global _ocr
     if _ocr is None:
-        print("Loading PaddleOCR models (first time will download ~100 MB)...")
+        logger.info("[pipeline] PaddleOCR loading models (first run downloads ~100 MB)")
         _ocr = PaddleOCR(lang='en')
-        print("PaddleOCR models loaded.")
+        logger.info("[pipeline] PaddleOCR ready")
     return _ocr
 
 
@@ -133,11 +137,22 @@ def _find_spine_gap(img, search_ratio=0.2, min_gap_width=15):
 # Synchronous processing functions used by one Cloud Run Job execution
 # -------------------------------------------------------------------
 def extract_pages(pdf_storage_path: str, job_id: str):
+    logger.info(
+        "[pipeline] job_id=%s task=extract_pages download path=%s",
+        job_id,
+        pdf_storage_path,
+    )
     pdf_bytes = supabase_admin.storage.from_("pdfs").download(pdf_storage_path)
     pdf = pdfium.PdfDocument(pdf_bytes)
+    page_count = len(pdf)
+    logger.info(
+        "[pipeline] job_id=%s task=extract_pages rendering page_count=%s",
+        job_id,
+        page_count,
+    )
 
     page_data_list = []
-    for page_num in range(len(pdf)):
+    for page_num in range(page_count):
         page = pdf[page_num]
         bitmap = page.render(scale=2)
         pil_image = bitmap.to_pil()
@@ -155,7 +170,11 @@ def extract_pages(pdf_storage_path: str, job_id: str):
             )
         except StorageApiError as e:
             if "Duplicate" in str(e) or "409" in str(e):
-                print(f"Page {page_num} already exists, skipping upload.")
+                logger.info(
+                    "[pipeline] job_id=%s task=extract_pages page=%s already in storage",
+                    job_id,
+                    page_num,
+                )
             else:
                 raise
         # Persist object paths, not public URLs. The authenticated assets route
@@ -163,6 +182,11 @@ def extract_pages(pdf_storage_path: str, job_id: str):
         page_data_list.append({"path": storage_path})
 
     pdf.close()
+    logger.info(
+        "[pipeline] job_id=%s task=extract_pages done uploaded_pages=%s",
+        job_id,
+        len(page_data_list),
+    )
     return page_data_list
 
 

@@ -34,7 +34,7 @@ async def get_job_status(
         supabase_admin.table("processing_jobs")
         .select("status,state_json")
         .eq("id", str(job_id))
-        .eq("cognito_sub", current_user.sub)
+        .eq("cognito_sub", current_user.sub)  # Firebase uid (legacy column name)
         .execute()
     )
     if not job.data:
@@ -50,7 +50,7 @@ async def get_job_assets(
         supabase_admin.table("processing_jobs")
         .select("state_json,status")
         .eq("id", str(job_id))
-        .eq("cognito_sub", current_user.sub)
+        .eq("cognito_sub", current_user.sub)  # Firebase uid (legacy column name)
         .execute()
     )
     if not job.data:
@@ -105,7 +105,8 @@ async def get_job_assets(
         idx = scene["scene_index"]
         segment_id = scene.get("segment_id", f"scene_{idx:04d}")
         # Find panel for this scene (each scene has one panel index)
-        panel_idx = scene["panels"][0]
+        scene_panels = scene.get("panels") or []
+        panel_idx = scene_panels[0] if scene_panels else 0
         panel = panels[panel_idx] if panel_idx < len(panels) else {}
         audio = audio_by_segment.get(segment_id, "")
         timing = timing_by_segment.get(segment_id)
@@ -151,9 +152,18 @@ async def get_job_assets(
             "audio_url": audio,  # individual audio (optional, not used by videoMaker)
         })
 
+    story_summary = (state.get("story_summary") or "").strip()
+    if not story_summary:
+        story_summary = " ".join(
+            str(item.get("narration_text", "")).strip()
+            for item in narration
+            if str(item.get("narration_text", "")).strip()
+        )
+
     return {
         "image_urls": image_urls,
         "audio_url": combined_audio,          # single combined audio
         "final_video_segments": final_video_segments,
         "total_duration": sum(s["duration"] for s in final_video_segments),
+        "story_summary": story_summary,
     }

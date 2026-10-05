@@ -8,9 +8,15 @@ import {
   onAuthStateChanged,
   signInWithEmailAndPassword,
   signInWithPopup,
+  signInWithRedirect,
   signOut,
 } from "firebase/auth";
-import { auth, googleProvider, firebaseConfigStatus } from "../lib/firebaseClient";
+import {
+  auth,
+  getGoogleRedirectResultOnce,
+  googleProvider,
+  firebaseConfigStatus,
+} from "../lib/firebaseClient";
 import { normalizeAuthError } from "../lib/authErrors";
 import { AuthContextValue } from "./authContextValue";
 
@@ -27,15 +33,19 @@ function mapFirebaseUser(firebaseUser) {
   };
 }
 
+const POPUP_FALLBACK_CODES = new Set([
+  "auth/popup-blocked",
+  "auth/cancelled-popup-request",
+]);
+
 export const AuthProvider = ({ children }) => {
   const [user, setUser] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [googleRedirectError, setGoogleRedirectError] = useState(null);
 
   const refreshUser = useCallback(async () => {
-    const current = auth.currentUser;
-    const mapped = mapFirebaseUser(current);
+    const mapped = mapFirebaseUser(auth.currentUser);
     setUser(mapped);
-    setLoading(false);
     return mapped;
   }, []);
 
@@ -44,6 +54,27 @@ export const AuthProvider = ({ children }) => {
       setUser(mapFirebaseUser(firebaseUser));
       setLoading(false);
     });
+
+    void getGoogleRedirectResultOnce()
+      .then((result) => {
+        if (result?.user) {
+          setUser(mapFirebaseUser(result.user));
+        }
+      })
+      .catch((error) => {
+        if (auth.currentUser) {
+          setUser(mapFirebaseUser(auth.currentUser));
+          return;
+        }
+        setGoogleRedirectError(
+          normalizeAuthError(error, {
+            fallbackTitle: "Google sign-in failed",
+            fallbackMessage:
+              "We could not complete Google sign-in. Please try again.",
+          }),
+        );
+      });
+
     return unsubscribe;
   }, []);
 
@@ -84,11 +115,36 @@ export const AuthProvider = ({ children }) => {
       await refreshUser();
       return { data: { session: true }, error: null };
     } catch (error) {
+      const code = String(error?.code || "");
+      if (POPUP_FALLBACK_CODES.has(code)) {
+        try {
+          await signInWithRedirect(auth, googleProvider);
+          return { data: null, error: null, redirecting: true };
+        } catch (redirectError) {
+          return {
+            data: null,
+            error: normalizeAuthError(redirectError, {
+              fallbackTitle: "Google sign-in failed",
+              fallbackMessage:
+                "We could not complete Google sign-in. Please try again.",
+            }),
+          };
+        }
+      }
+
+      if (code === "auth/popup-closed-by-user") {
+        return {
+          data: null,
+          error: normalizeAuthError(error),
+        };
+      }
+
       return {
         data: null,
         error: normalizeAuthError(error, {
           fallbackTitle: "Google sign-in failed",
-          fallbackMessage: "We could not complete Google sign-in. Please try again.",
+          fallbackMessage:
+            "We could not complete Google sign-in. Please try again.",
         }),
       };
     }
@@ -99,9 +155,15 @@ export const AuthProvider = ({ children }) => {
     setUser(null);
   };
 
+  const clearGoogleRedirectError = useCallback(() => {
+    setGoogleRedirectError(null);
+  }, []);
+
   const value = {
     user,
     loading,
+    googleRedirectError,
+    clearGoogleRedirectError,
     signInWithEmail,
     signUpWithEmail,
     signInWithGoogle,
@@ -112,7 +174,7 @@ export const AuthProvider = ({ children }) => {
 
   return (
     <AuthContextValue.Provider value={value}>
-      {!loading && children}
+      {children}
     </AuthContextValue.Provider>
   );
 };

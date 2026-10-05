@@ -10,6 +10,7 @@ from pydantic import BaseModel, Field
 from core.auth import AuthenticatedUser, get_current_user
 from core.config import settings
 from core.job_launcher import JobLaunchError, launch_cloud_run_job
+from core.job_log import log_start, log_upload
 from core.pipeline_state import build_initial_pipeline_state
 from db.supabase_admin import supabase_admin
 
@@ -26,7 +27,7 @@ class CreatePdfUploadRequest(BaseModel):
     genre: str = Field(default="", max_length=100)
     season: str = Field(default="", max_length=50)
     chapter_number: str = Field(default="", max_length=50)
-    series_context: str = Field(default="", max_length=500)
+    series_context: str = Field(default="", max_length=12000)
 
 
 def _response_dict(response: object) -> dict:
@@ -71,15 +72,36 @@ async def create_pdf_upload(
 ):
     filename = Path(request.filename).name
     if not filename.lower().endswith(".pdf"):
+        logger.warning("upload rejected: not a .pdf filename=%s", filename)
         raise HTTPException(status_code=400, detail="Only PDF files are allowed")
     if request.content_type.lower() not in {"application/pdf", "application/x-pdf"}:
+        logger.warning(
+            "upload rejected: bad content_type=%s filename=%s",
+            request.content_type,
+            filename,
+        )
         raise HTTPException(status_code=400, detail="The file content type must be application/pdf")
     if request.size_bytes > settings.max_pdf_bytes:
         max_mb = settings.max_pdf_bytes // (1024 * 1024)
+        logger.warning(
+            "upload rejected: too large size_bytes=%s max_bytes=%s filename=%s",
+            request.size_bytes,
+            settings.max_pdf_bytes,
+            filename,
+        )
         raise HTTPException(status_code=413, detail=f"PDF must be {max_mb} MB or smaller")
 
     job_id = str(uuid4())
     file_path = f"{job_id}/source.pdf"
+    log_upload(
+        logger,
+        job_id,
+        "create_upload_url requested",
+        user_sub=current_user.sub[:8] + "...",
+        filename=filename,
+        size_bytes=request.size_bytes,
+        storage_path=file_path,
+    )
     initial_state = build_initial_pipeline_state(
         job_id,
         file_path,
@@ -91,10 +113,12 @@ async def create_pdf_upload(
     )
 
     try:
+        log_upload(logger, job_id, "supabase signed_upload_url")
         signed_response = supabase_admin.storage.from_("pdfs").create_signed_upload_url(
             file_path
         )
         upload_token = _signed_upload_token(signed_response)
+        log_upload(logger, job_id, "supabase rpc create_processing_upload")
         creation_result = _rpc_scalar(supabase_admin.rpc(
             "create_processing_upload",
             {
@@ -107,18 +131,30 @@ async def create_pdf_upload(
             },
         ).execute())
     except Exception:
-        logger.exception("Could not prepare PDF upload for job %s", job_id)
+        logger.exception("[upload] job_id=%s phase=prepare failed", job_id)
         raise HTTPException(status_code=500, detail="Could not prepare the PDF upload")
 
     if creation_result in {"PENDING_LIMIT", "GLOBAL_PENDING_LIMIT"}:
+        log_upload(logger, job_id, "quota blocked", rpc_result=creation_result)
         raise HTTPException(
             status_code=429,
             detail="Too many pending uploads. Finish or wait for an earlier upload to expire.",
         )
     if creation_result != "CREATED":
-        logger.error("Unexpected upload reservation result for job %s", job_id)
+        logger.error(
+            "[upload] job_id=%s phase=reserve unexpected rpc_result=%s",
+            job_id,
+            creation_result,
+        )
         raise HTTPException(status_code=500, detail="Could not prepare the PDF upload")
 
+    log_upload(
+        logger,
+        job_id,
+        "ready for client PUT to storage",
+        status="UPLOAD_PENDING",
+        expires_in=7200,
+    )
     return {
         "job_id": job_id,
         "path": file_path,
@@ -135,6 +171,13 @@ async def start_job(
     current_user: AuthenticatedUser = Depends(get_current_user),
 ):
     job_id_value = str(job_id)
+    log_start(
+        logger,
+        job_id_value,
+        "start requested",
+        user_sub=current_user.sub[:8] + "...",
+        execution_mode=settings.pipeline_execution_mode,
+    )
     reservation = supabase_admin.rpc(
         "queue_processing_job",
         {
@@ -145,8 +188,10 @@ async def start_job(
         },
     ).execute()
     reservation_result = _rpc_scalar(reservation)
+    log_start(logger, job_id_value, "queue_processing_job", rpc_result=reservation_result)
 
     if reservation_result == "NOT_FOUND":
+        log_start(logger, job_id_value, "failed job not found")
         raise HTTPException(status_code=404, detail="Job not found")
     if reservation_result in {"BUSY", "USER_LIMIT", "GLOBAL_LIMIT"}:
         messages = {
@@ -157,8 +202,15 @@ async def start_job(
         raise HTTPException(status_code=429, detail=messages[reservation_result])
     if isinstance(reservation_result, str) and reservation_result.startswith("ALREADY_"):
         current_status = reservation_result.removeprefix("ALREADY_")
+        log_start(logger, job_id_value, "skipped already started", status=current_status)
         return {"job_id": job_id_value, "status": current_status, "already_started": True}
     if reservation_result != "QUEUED":
+        log_start(
+            logger,
+            job_id_value,
+            "failed invalid state for start",
+            rpc_result=reservation_result,
+        )
         raise HTTPException(status_code=409, detail="Job cannot be started in its current state")
 
     execution_mode = settings.pipeline_execution_mode.strip().lower()
@@ -166,8 +218,10 @@ async def start_job(
         if execution_mode == "local":
             from core.pipeline_runner import process_queued_job
 
+            log_start(logger, job_id_value, "scheduling background pipeline (local)")
             background_tasks.add_task(process_queued_job, job_id_value)
         elif execution_mode == "cloud_run":
+            log_start(logger, job_id_value, "launching Cloud Run job")
             await asyncio.to_thread(launch_cloud_run_job, job_id_value)
         else:
             raise JobLaunchError(
@@ -181,7 +235,8 @@ async def start_job(
             .eq("status", "QUEUED")
             .execute()
         )
-        logger.exception("Could not launch pipeline job %s", job_id_value)
+        logger.exception("[start] job_id=%s phase=launch failed", job_id_value)
         raise HTTPException(status_code=503, detail="Processing could not be started. Please retry.")
 
+    log_start(logger, job_id_value, "accepted", status="QUEUED")
     return {"job_id": job_id_value, "status": "QUEUED", "already_started": False}

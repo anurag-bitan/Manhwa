@@ -1,4 +1,9 @@
+from pathlib import Path
+
 from pydantic_settings import BaseSettings
+
+_BACKEND_DIR = Path(__file__).resolve().parents[1]
+_ENV_FILE = _BACKEND_DIR / ".env"
 
 
 class Settings(BaseSettings):
@@ -9,7 +14,12 @@ class Settings(BaseSettings):
     firebase_service_account_json: str = ""
     firebase_service_account_path: str = ""
     gemini_api_key: str = ""
-    gemini_model: str = "gemini-2.5-flash"
+    gemini_model: str = "gemini-3.8-flash"
+    deepseek_api_key: str = ""
+    deepseek_api_base_url: str = "https://api.deepseek.com"
+    deepseek_model: str = "deepseek-chat"
+    # deepseek | gemini — default deepseek when DEEPSEEK_API_KEY is set
+    narration_provider: str = ""
     vertex_location: str = "europe-west1"
     cors_allowed_origins: str = "http://localhost:5173,http://127.0.0.1:5173"
     storage_signed_url_ttl_seconds: int = 7200
@@ -47,8 +57,17 @@ class Settings(BaseSettings):
     def vertex_project_id(self) -> str:
         return self.gcp_project_id or self.firebase_project_id
 
+    @property
+    def narration_backend(self) -> str:
+        choice = self.narration_provider.strip().lower()
+        if choice in {"gemini", "deepseek"}:
+            return choice
+        if self.deepseek_api_key.strip():
+            return "deepseek"
+        return "gemini"
+
     class Config:
-        env_file = ".env"
+        env_file = str(_ENV_FILE)
         env_file_encoding = "utf-8"
         extra = "allow"
 
