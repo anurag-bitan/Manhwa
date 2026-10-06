@@ -18,6 +18,7 @@ import {
   Cpu,
   Maximize,
   Minimize,
+  Info,
 } from "lucide-react";
 
 import { ApiError, generateAudioStory, checkTaskStatus, previewManhwaContext } from '../api/api';
@@ -45,6 +46,7 @@ const UploadPage = () => {
   const [videoBlob, setVideoBlob] = useState(null);
   const [isProcessing, setIsProcessing] = useState(false);
   const [progress, setProgress] = useState(0);
+  const [progressDetail, setProgressDetail] = useState("");
   const [isDragging, setIsDragging] = useState(false);
   const [error, setError] = useState(null);
   const [storyData, setStoryData] = useState(null);
@@ -70,6 +72,10 @@ const UploadPage = () => {
     [storyData, panelImages],
   );
   const chapterStory = (storyData?.story_summary || "").trim();
+  const summaryReady = Boolean(seriesContext.trim());
+  const showSummaryWaitTooltip = Boolean(
+    file && !isProcessing && !storyData && !isGeneratingVideo && !summaryReady,
+  );
 
   // Restore session data on mount
   useEffect(() => {
@@ -325,6 +331,7 @@ const UploadPage = () => {
 
     setIsProcessing(true);
     setProgress(0);
+    setProgressDetail("Starting upload");
     setError(null);
     setPanelImages([]);
     setStoryData(null);
@@ -343,6 +350,12 @@ const UploadPage = () => {
         chapterNumber,
         seriesContext,
         pendingJobId,
+        onProgress: (detail, current, total) => {
+          setProgressDetail(detail || "");
+          if (current && total) {
+            setProgress(Math.max(2, Math.round((current / total) * 10)));
+          }
+        },
       });
       const taskId = startResponse.task_id;
       setPendingJobId("");
@@ -360,6 +373,7 @@ const UploadPage = () => {
           if (statusData.state === 'PROCESSING') {
             // Update progress bar based on real worker progress
             setProgress(statusData.progress || 20);
+            if (statusData.detail) setProgressDetail(statusData.detail);
           }
           else if (statusData.state === 'SUCCESS') {
             hasCompleted = true; // Mark as completed immediately
@@ -756,7 +770,7 @@ const UploadPage = () => {
 
               <div className="flex items-center justify-center gap-2 text-gray-400 text-xs sm:text-sm">
                 <Loader2 className="w-3 h-3 sm:w-4 sm:h-4 animate-spin flex-shrink-0" />
-                <span className="text-center">Extracting panels, running OCR, generating script and audio...</span>
+                <span className="text-center">{progressDetail || "Extracting panels, running OCR, generating script and audio..."}</span>
               </div>
             </div>
           )}
@@ -911,34 +925,55 @@ const UploadPage = () => {
 
       {/* Action buttons */}
       <div className="max-w-7xl mx-auto flex flex-col sm:flex-row gap-3 sm:gap-4 md:gap-6 justify-center mb-6 sm:mb-8 lg:mb-10 relative">
-        <button
-          onClick={handleGenerateStory}
-          disabled={isProcessing || !file || isGeneratingVideo}
-          className={`w-full sm:w-auto px-5 sm:px-6 md:px-8 py-3.5 sm:py-4 md:py-5 rounded-full font-bold text-sm sm:text-base md:text-lg transition-all flex items-center justify-center gap-2 sm:gap-2.5 md:gap-3 backdrop-blur-xl border shadow-[0_8px_25px_rgba(255,255,255,0.15)] 
+        <div className="relative group/story w-full sm:w-auto">
+          <button
+            onClick={handleGenerateStory}
+            disabled={isProcessing || !file || isGeneratingVideo}
+            aria-describedby={showSummaryWaitTooltip ? "generate-story-summary-tip" : undefined}
+            className={`w-full sm:w-auto px-5 sm:px-6 md:px-8 py-3.5 sm:py-4 md:py-5 rounded-full font-bold text-sm sm:text-base md:text-lg transition-all flex items-center justify-center gap-2 sm:gap-2.5 md:gap-3 backdrop-blur-xl border shadow-[0_8px_25px_rgba(255,255,255,0.15)] 
   ${isProcessing || !file || isGeneratingVideo
               ? "opacity-50 cursor-not-allowed bg-white/10 border-white/20"
               : storyData
                 ? "bg-gradient-to-r from-purple-400 via-purple-400 to-indigo-500 text-white hover:from-purple-500 hover:to-purple-700 border-gray-400/50 hover:scale-105 active:scale-95"
                 : "bg-white/10 border-white/20 hover:bg-white/20 hover:scale-105 active:scale-95"
             }`}
-        >
-          {isProcessing ? (
-            <>
-              <Loader2 className="w-4 h-4 sm:w-5 sm:h-5 md:w-6 md:h-6 animate-spin flex-shrink-0" />
-              <span className="whitespace-nowrap">Processing {progress}%</span>
-            </>
-          ) : storyData ? (
-            <>
-              <Cpu className="w-4 h-4 sm:w-5 sm:h-5 md:w-6 md:h-6 flex-shrink-0" />
-              <span className="whitespace-nowrap">Regenerate Frames</span>
-            </>
-          ) : (
-            <>
-              <Cpu className="w-4 h-4 sm:w-5 sm:h-5 md:w-6 md:h-6 flex-shrink-0" />
-              <span className="whitespace-nowrap">Generate Story</span>
-            </>
+          >
+            {isProcessing ? (
+              <>
+                <Loader2 className="w-4 h-4 sm:w-5 sm:h-5 md:w-6 md:h-6 animate-spin flex-shrink-0" />
+                <span className="whitespace-nowrap">Processing {progress}%</span>
+              </>
+            ) : storyData ? (
+              <>
+                <Cpu className="w-4 h-4 sm:w-5 sm:h-5 md:w-6 md:h-6 flex-shrink-0" />
+                <span className="whitespace-nowrap">Regenerate Frames</span>
+              </>
+            ) : (
+              <>
+                <Cpu className="w-4 h-4 sm:w-5 sm:h-5 md:w-6 md:h-6 flex-shrink-0" />
+                <span className="whitespace-nowrap">Generate Story</span>
+              </>
+            )}
+          </button>
+          {showSummaryWaitTooltip && (
+            <div
+              id="generate-story-summary-tip"
+              role="tooltip"
+              className="pointer-events-none absolute left-1/2 bottom-full z-30 mb-3 w-[min(19rem,calc(100vw-2rem))] -translate-x-1/2 opacity-0 translate-y-1 scale-95 transition-all duration-200 group-hover/story:opacity-100 group-hover/story:translate-y-0 group-hover/story:scale-100 group-focus-within/story:opacity-100 group-focus-within/story:translate-y-0 group-focus-within/story:scale-100"
+            >
+              <div className="rounded-2xl border border-purple-400/40 bg-gray-950/95 px-4 py-3 text-left shadow-[0_16px_40px_rgba(168,85,247,0.35)] backdrop-blur-xl">
+                <p className="flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-[0.14em] text-purple-300">
+                  <Info className="h-3.5 w-3.5 shrink-0" />
+                  Summary not ready
+                </p>
+                <p className="mt-1.5 text-xs sm:text-sm leading-relaxed text-gray-200">
+                  Please wait until the summary is generated. That will make your story better.
+                </p>
+              </div>
+              <div className="mx-auto -mt-1.5 h-3 w-3 rotate-45 border-r border-b border-purple-400/40 bg-gray-950/95" />
+            </div>
           )}
-        </button>
+        </div>
 
         <button
           onClick={handleGenerateVideo}

@@ -344,14 +344,14 @@ def fetch_grounded_context(
     return ds
 
 
-def panel_thumbnail_jpeg(page_bytes: bytes, bbox: list[int], max_size: int = 512) -> bytes:
+def panel_thumbnail_jpeg(page_bytes: bytes, bbox: list[int], max_size: int = 256) -> bytes:
     """Crop a panel from a page image and return a small JPEG for Gemini."""
     page_img = Image.open(io.BytesIO(page_bytes))
     x1, y1, x2, y2 = [int(v) for v in bbox]
     cropped = page_img.crop((x1, y1, x2, y2))
     cropped.thumbnail((max_size, max_size), Image.LANCZOS)
     buffer = io.BytesIO()
-    cropped.convert("RGB").save(buffer, format="JPEG", quality=70)
+    cropped.convert("RGB").save(buffer, format="JPEG", quality=40, optimize=True)
     return buffer.getvalue()
 
 

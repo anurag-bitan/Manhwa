@@ -156,7 +156,7 @@ def generate_narration_batch_deepseek(
     story_scenes: list[dict[str, Any]],
     panel_thumbnails: dict[str, bytes],
 ) -> dict[str, str]:
-    del panel_thumbnails  # deepseek-chat is text-only
+    del panel_thumbnails  # text-only: skip image upload so narration stays fast
     if not story_scenes:
         logger.info("[pipeline] deepseek narration skipped (no story scenes)")
         return {}

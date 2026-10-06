@@ -4,7 +4,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 from uuid import UUID, uuid4
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
+from fastapi import APIRouter, BackgroundTasks, Body, Depends, HTTPException, status
 from pydantic import BaseModel, Field
 
 from core.auth import AuthenticatedUser, get_current_user
@@ -28,6 +28,15 @@ class CreatePdfUploadRequest(BaseModel):
     season: str = Field(default="", max_length=50)
     chapter_number: str = Field(default="", max_length=50)
     series_context: str = Field(default="", max_length=12000)
+
+
+class PageUploadUrlsRequest(BaseModel):
+    page_count: int = Field(gt=0, le=200)
+
+
+class StartJobBody(BaseModel):
+    client_pages: bool = False
+    page_count: int = Field(default=0, ge=0, le=200)
 
 
 def _response_dict(response: object) -> dict:
@@ -164,11 +173,45 @@ async def create_pdf_upload(
     }
 
 
+@router.post("/{job_id}/page-upload-urls")
+async def create_page_upload_urls(
+    job_id: UUID,
+    request: PageUploadUrlsRequest,
+    current_user: AuthenticatedUser = Depends(get_current_user),
+):
+    job_id_value = str(job_id)
+    job = (
+        supabase_admin.table("processing_jobs")
+        .select("id,status,state_json")
+        .eq("id", job_id_value)
+        .eq("cognito_sub", current_user.sub)
+        .limit(1)
+        .execute()
+    )
+    if not job.data:
+        raise HTTPException(status_code=404, detail="Job not found")
+    if job.data[0].get("status") != "UPLOAD_PENDING":
+        raise HTTPException(status_code=409, detail="Pages can only be uploaded before processing starts")
+
+    pages = []
+    for page_num in range(request.page_count):
+        file_path = f"{job_id_value}/pages/page_{page_num:04d}.jpg"
+        signed_response = supabase_admin.storage.from_("pages").create_signed_upload_url(file_path)
+        pages.append({
+            "index": page_num,
+            "path": file_path,
+            "token": _signed_upload_token(signed_response),
+        })
+    log_upload(logger, job_id_value, "page signed upload urls", page_count=request.page_count)
+    return {"job_id": job_id_value, "pages": pages, "expires_in": 7200}
+
+
 @router.post("/{job_id}/start", status_code=status.HTTP_202_ACCEPTED)
 async def start_job(
     job_id: UUID,
     background_tasks: BackgroundTasks,
     current_user: AuthenticatedUser = Depends(get_current_user),
+    body: StartJobBody = Body(default_factory=StartJobBody),
 ):
     job_id_value = str(job_id)
     log_start(
@@ -212,6 +255,22 @@ async def start_job(
             rpc_result=reservation_result,
         )
         raise HTTPException(status_code=409, detail="Job cannot be started in its current state")
+
+    if body.client_pages and body.page_count > 0:
+        row = (
+            supabase_admin.table("processing_jobs")
+            .select("state_json")
+            .eq("id", job_id_value)
+            .limit(1)
+            .execute()
+        )
+        state_json = (row.data[0].get("state_json") if row.data else {}) or {}
+        state_json["client_pages"] = True
+        state_json["client_page_count"] = body.page_count
+        supabase_admin.table("processing_jobs").update({"state_json": state_json}).eq(
+            "id", job_id_value
+        ).execute()
+        log_start(logger, job_id_value, "client pages ready", page_count=body.page_count)
 
     execution_mode = settings.pipeline_execution_mode.strip().lower()
     try:

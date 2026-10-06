@@ -40,7 +40,12 @@ class PipelineState(TypedDict):
 def extract_pages_node(state: PipelineState) -> PipelineState:
     from workers.tasks import extract_pages
 
-    page_urls = extract_pages(state["pdf_storage_path"], state["job_id"])
+    client_count = int(state.get("client_page_count") or 0) if state.get("client_pages") else 0
+    page_urls = extract_pages(
+        state["pdf_storage_path"],
+        state["job_id"],
+        client_page_count=client_count,
+    )
     state["page_urls"] = page_urls
     state["status"] = "EXTRACTED"
     update_job_status(state["job_id"], state["status"])
@@ -82,9 +87,25 @@ def detect_panels_node(state: PipelineState) -> PipelineState:
     return state
 
 
-def update_job_status(job_id: str, status: str):
+def update_job_status(job_id: str, status: str, progress: dict | None = None):
+    payload: dict = {"status": status}
+    if progress is not None:
+        try:
+            row = (
+                supabase_admin.table("processing_jobs")
+                .select("state_json")
+                .eq("id", job_id)
+                .limit(1)
+                .execute()
+            )
+            state_json = (row.data[0].get("state_json") if row.data else {}) or {}
+            state_json["status"] = status
+            state_json["progress"] = progress
+            payload["state_json"] = state_json
+        except Exception:
+            logger.exception("[pipeline] job_id=%s failed to merge progress into state_json", job_id)
     try:
-        supabase_admin.table("processing_jobs").update({"status": status}).eq("id", job_id).execute()
+        supabase_admin.table("processing_jobs").update(payload).eq("id", job_id).execute()
         logger.debug("[pipeline] job_id=%s db status=%s", job_id, status)
     except Exception as exc:
         logger.exception("[pipeline] job_id=%s failed to update status=%s", job_id, status)
@@ -96,6 +117,25 @@ def update_job_status(job_id: str, status: str):
             {"job_id": job_id, "status": status, "error_type": type(exc).__name__},
         )
         # #endregion
+
+
+def report_progress(
+    job_id: str,
+    status: str,
+    current: int | None = None,
+    total: int | None = None,
+    detail: str = "",
+):
+    update_job_status(
+        job_id,
+        status,
+        {
+            "status": status,
+            "current": current,
+            "total": total,
+            "detail": detail,
+        },
+    )
 
 
 def _node_result_summary(node_name: str, state: PipelineState) -> str:
@@ -166,13 +206,25 @@ def _wrap_pipeline_node(node_name: str, fn: Callable[[PipelineState], PipelineSt
 
 
 def crop_and_ocr_node(state: PipelineState) -> PipelineState:
-    from workers.tasks import crop_and_ocr, flush_ocr_stats, reset_ocr_stats
+    from workers.tasks import flush_ocr_stats, ocr_page_panels, reset_ocr_stats
 
     reset_ocr_stats()
-    ocr_results = [
-        crop_and_ocr(panel, idx)
-        for idx, panel in enumerate(state["panels"])
-    ]
+    by_page: dict[str, list[dict]] = {}
+    for idx, panel in enumerate(state["panels"]):
+        item = {**panel, "panel_index": idx}
+        by_page.setdefault(panel["page_path"], []).append(item)
+
+    ocr_results = []
+    page_total = len(by_page)
+    for page_index, (page_path, panels) in enumerate(by_page.items(), start=1):
+        report_progress(
+            state["job_id"],
+            "PANELS_DETECTED",
+            current=page_index,
+            total=page_total,
+            detail=f"OCR page {page_index}/{page_total}",
+        )
+        ocr_results.extend(ocr_page_panels(page_path, panels))
 
     ocr_results.sort(key=lambda x: x["panel_index"])
     state["ocr_results"] = ocr_results
@@ -182,7 +234,7 @@ def crop_and_ocr_node(state: PipelineState) -> PipelineState:
     return state
 
 
-def apply_chapter_metadata_node(state: PipelineState) -> PipelineState:
+def apply_chapter_metadata_node(state: PipelineState, persist_status: bool = True) -> PipelineState:
     """Set chapter metadata from user input. Series context comes from upload preview."""
     title = (state.get("manhwa_name") or "").strip() or "Unknown"
     chapter_num = (state.get("chapter_number") or "").strip()
@@ -201,26 +253,28 @@ def apply_chapter_metadata_node(state: PipelineState) -> PipelineState:
     if not state.get("series_context"):
         state["series_context"] = ""
 
-    state["status"] = "CHAPTER_DETECTED"
-    update_job_status(state["job_id"], state["status"])
+    if persist_status:
+        state["status"] = "CHAPTER_DETECTED"
+        update_job_status(state["job_id"], state["status"])
     return state
 
 
-def build_scenes_node(state: PipelineState) -> PipelineState:
-    SKIP_KEYWORDS = [
-        "author", "note", "credit", "disclaimer", "support the official",
-        "read this from the official", "free release", "patreon",
-        "help us release faster", "more content better quality",
-        "artist", "editor", "scanlation", "typeset", "proofread",
-        "do not repost", "do not redistribute", "fan translation",
-        "this is a fan translation", "unofficial", "non profit",
-        "to be continued"
-    ]
+SKIP_KEYWORDS = [
+    "author", "note", "credit", "disclaimer", "support the official",
+    "read this from the official", "free release", "patreon",
+    "help us release faster", "more content better quality",
+    "artist", "editor", "scanlation", "typeset", "proofread",
+    "do not repost", "do not redistribute", "fan translation",
+    "this is a fan translation", "unofficial", "non profit",
+    "to be continued",
+]
 
+
+def scenes_from_ocr(ocr_results: list[dict]) -> list[dict]:
     scenes = []
     story_index = 0
-    for i, ocr in enumerate(state["ocr_results"]):
-        text = ocr["text"].lower()
+    for i, ocr in enumerate(ocr_results):
+        text = (ocr.get("text") or "").lower()
         is_skip = any(keyword in text for keyword in SKIP_KEYWORDS)
         if not text.strip() or text in ["", "44^^^44||"]:
             is_skip = True
@@ -229,8 +283,8 @@ def build_scenes_node(state: PipelineState) -> PipelineState:
                 "scene_index": i,
                 "segment_id": f"scene_{i:04d}",
                 "panels": [ocr["panel_index"]],
-                "text": ocr["text"],
-                "is_story": False
+                "text": ocr.get("text") or "",
+                "is_story": False,
             })
         else:
             scenes.append({
@@ -238,11 +292,15 @@ def build_scenes_node(state: PipelineState) -> PipelineState:
                 "story_index": story_index,
                 "segment_id": f"scene_{i:04d}",
                 "panels": [ocr["panel_index"]],
-                "text": ocr["text"],
-                "is_story": True
+                "text": ocr.get("text") or "",
+                "is_story": True,
             })
             story_index += 1
+    return scenes
 
+
+def build_scenes_node(state: PipelineState) -> PipelineState:
+    scenes = scenes_from_ocr(state["ocr_results"])
     state["scenes"] = scenes
     state["rolling_summary"] = ""
     state["status"] = "SCENE_BUILDING"
@@ -252,6 +310,7 @@ def build_scenes_node(state: PipelineState) -> PipelineState:
 
 def _build_panel_thumbnails(state: PipelineState, story_scenes: list[dict]) -> dict[str, bytes]:
     from core.gemini_client import panel_thumbnail_jpeg
+    from workers.tasks import get_page_bytes
 
     page_cache: dict[str, bytes] = {}
     thumbnails: dict[str, bytes] = {}
@@ -267,7 +326,7 @@ def _build_panel_thumbnails(state: PipelineState, story_scenes: list[dict]) -> d
         panel = state["panels"][panel_idx]
         page_path = panel["page_path"]
         if page_path not in page_cache:
-            page_cache[page_path] = supabase_admin.storage.from_("pages").download(page_path)
+            page_cache[page_path] = get_page_bytes(page_path)
         try:
             thumbnails[segment_id] = panel_thumbnail_jpeg(
                 page_cache[page_path],
@@ -311,7 +370,10 @@ def generate_narration_node(state: PipelineState) -> PipelineState:
         story_scenes=story_scenes,
         panel_thumbnails=panel_thumbnails,
     )
+    return _apply_narration(state, narration_by_id)
 
+
+def _apply_narration(state: PipelineState, narration_by_id: dict[str, str]) -> PipelineState:
     narrations = []
     for scene in state["scenes"]:
         segment_id = scene["segment_id"]
@@ -454,6 +516,140 @@ def build_pipeline_graph():
 
 
 def run_pipeline(state: PipelineState):
-    graph = build_pipeline_graph()
-    final_state = graph.invoke(state)
-    return final_state
+    """Extract, OCR page-by-page, overlap DeepSeek with later pages, then TTS."""
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    from core.config import settings
+    from core.narration import generate_narration_batch
+    from workers.tasks import (
+        clear_page_cache,
+        detect_panels,
+        extract_pages,
+        flush_detect_stats,
+        flush_ocr_stats,
+        ocr_page_panels,
+        reset_detect_stats,
+        reset_ocr_stats,
+    )
+
+    job_id = state["job_id"]
+    executor = ThreadPoolExecutor(max_workers=1)
+    try:
+        client_count = 0
+        if state.get("client_pages"):
+            try:
+                client_count = int(state.get("client_page_count") or 0)
+            except (TypeError, ValueError):
+                client_count = 0
+
+        report_progress(job_id, "PROCESSING", detail="Extracting pages")
+        page_urls = extract_pages(
+            state["pdf_storage_path"],
+            job_id,
+            client_page_count=client_count,
+        )
+        state["page_urls"] = page_urls
+        state["status"] = "EXTRACTED"
+        report_progress(
+            job_id,
+            "EXTRACTED",
+            current=len(page_urls),
+            total=len(page_urls),
+            detail=f"Extracted {len(page_urls)} pages",
+        )
+        apply_chapter_metadata_node(state, persist_status=False)
+
+        reset_detect_stats()
+        reset_ocr_stats()
+        all_panels: list[dict] = []
+        all_ocr: list[dict] = []
+        pending_story: list[dict] = []
+        submitted_ids: set[str] = set()
+        futures = []
+        use_overlap = settings.narration_backend != "gemini"
+
+        def flush_narration(force: bool = False) -> None:
+            batch_size = max(1, settings.narration_batch_size)
+            while pending_story and (force or len(pending_story) >= batch_size):
+                chunk = pending_story[:batch_size]
+                del pending_story[:batch_size]
+                futures.append(
+                    executor.submit(
+                        generate_narration_batch,
+                        series_context=state.get("series_context", ""),
+                        chapter_info=state.get("chapter_info", {}),
+                        story_scenes=chunk,
+                        panel_thumbnails={},
+                    )
+                )
+
+        page_total = len(page_urls)
+        for page_number, page in enumerate(page_urls):
+            report_progress(
+                job_id,
+                "PANELS_DETECTED",
+                current=page_number + 1,
+                total=page_total,
+                detail=f"OCR page {page_number + 1}/{page_total}",
+            )
+            detected = detect_panels(page["path"], page_number)
+            boxes = detected.get("boxes") or [[0, 0, 1200, 1600]]
+            page_panels = []
+            for box in boxes:
+                page_panels.append({
+                    "page_number": page_number,
+                    "bbox": box,
+                    "page_path": page["path"],
+                    "panel_index": len(all_panels) + len(page_panels),
+                })
+            page_ocr = ocr_page_panels(page["path"], page_panels)
+            all_panels.extend(page_panels)
+            all_ocr.extend(page_ocr)
+            state["panels"] = all_panels
+            state["ocr_results"] = all_ocr
+            state["scenes"] = scenes_from_ocr(all_ocr)
+            if use_overlap:
+                for scene in state.get("scenes") or []:
+                    segment_id = scene.get("segment_id")
+                    if (
+                        scene.get("is_story")
+                        and (scene.get("text") or "").strip()
+                        and segment_id
+                        and segment_id not in submitted_ids
+                    ):
+                        pending_story.append({
+                            "scene_index": scene["scene_index"],
+                            "segment_id": segment_id,
+                            "text": scene["text"],
+                            "panels": scene.get("panels") or [],
+                        })
+                        submitted_ids.add(segment_id)
+                flush_narration(False)
+
+        flush_detect_stats(job_id)
+        flush_ocr_stats(job_id)
+        state["status"] = "OCR_COMPLETED"
+        report_progress(
+            job_id,
+            "OCR_COMPLETED",
+            current=page_total,
+            total=page_total,
+            detail="OCR complete",
+        )
+        build_scenes_node(state)
+
+        if use_overlap:
+            flush_narration(True)
+            narration_by_id: dict[str, str] = {}
+            for future in as_completed(futures):
+                narration_by_id.update(future.result() or {})
+            _apply_narration(state, narration_by_id)
+        else:
+            generate_narration_node(state)
+
+        report_progress(job_id, "SCRIPT_GENERATING", detail="Generating voiceover")
+        synthesize_audio_node(state)
+        return state
+    finally:
+        executor.shutdown(wait=False)
+        clear_page_cache(job_id)

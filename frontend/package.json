@@ -27,6 +27,7 @@
     "lucide-react": "^0.545.0",
     "mp4-muxer": "^5.2.2",
     "pdf2image": "^1.2.3",
+    "pdfjs-dist": "^4.10.38",
     "react": "^19.1.1",
     "react-dom": "^19.1.1",
     "react-dropzone": "^14.3.8",
