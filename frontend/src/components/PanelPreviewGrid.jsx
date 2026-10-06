@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { X } from "lucide-react";
 
 function cropFromBbox(img, bbox) {
@@ -15,7 +16,7 @@ function cropFromBbox(img, bbox) {
   return { x, y, width: w, height: h };
 }
 
-function CroppedPanelImage({ src, bbox, alt, className }) {
+function CroppedPanelImage({ src, bbox, alt, className, maxHeight = 320 }) {
   const canvasRef = useRef(null);
 
   useEffect(() => {
@@ -31,7 +32,7 @@ function CroppedPanelImage({ src, bbox, alt, className }) {
       if (cancelled) return;
       const crop = cropFromBbox(img, bbox);
       const maxW = canvas.parentElement?.clientWidth || 240;
-      const maxH = 320;
+      const maxH = maxHeight;
       const scale = Math.min(maxW / crop.width, maxH / crop.height, 1.5);
       const drawW = Math.max(1, Math.round(crop.width * scale));
       const drawH = Math.max(1, Math.round(crop.height * scale));
@@ -52,7 +53,7 @@ function CroppedPanelImage({ src, bbox, alt, className }) {
     return () => {
       cancelled = true;
     };
-  }, [src, bbox]);
+  }, [src, bbox, maxHeight]);
 
   return (
     <canvas
@@ -71,8 +72,13 @@ export default function PanelPreviewGrid({ cards }) {
     const onKey = (event) => {
       if (event.key === "Escape") setPreview(null);
     };
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
     window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
+    return () => {
+      document.body.style.overflow = previousOverflow;
+      window.removeEventListener("keydown", onKey);
+    };
   }, [preview]);
 
   if (!cards?.length) return null;
@@ -100,40 +106,43 @@ export default function PanelPreviewGrid({ cards }) {
         ))}
       </div>
 
-      {preview && (
-        <div
-          className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 p-4"
-          role="dialog"
-          aria-modal="true"
-          aria-label={`${preview.label} preview`}
-          onClick={() => setPreview(null)}
-        >
+      {preview &&
+        createPortal(
           <div
-            className="relative max-w-lg w-full rounded-2xl border border-purple-500/30 bg-gray-950 p-4 shadow-2xl"
-            onClick={(event) => event.stopPropagation()}
+            className="fixed inset-0 z-[100] flex items-center justify-center bg-black/80 p-4"
+            role="dialog"
+            aria-modal="true"
+            aria-label={`${preview.label} preview`}
+            onClick={() => setPreview(null)}
           >
-            <div className="flex items-center justify-between mb-3">
-              <h4 className="text-sm font-semibold text-white">{preview.label}</h4>
-              <button
-                type="button"
-                onClick={() => setPreview(null)}
-                className="rounded-lg p-1.5 text-gray-300 hover:bg-white/10 hover:text-white"
-                aria-label="Close preview"
-              >
-                <X className="w-5 h-5" />
-              </button>
+            <div
+              className="relative w-full max-w-lg max-h-[90vh] overflow-y-auto rounded-2xl border border-purple-500/30 bg-gray-950 p-4 shadow-2xl"
+              onClick={(event) => event.stopPropagation()}
+            >
+              <div className="flex items-center justify-between mb-3">
+                <h4 className="text-sm font-semibold text-white">{preview.label}</h4>
+                <button
+                  type="button"
+                  onClick={() => setPreview(null)}
+                  className="rounded-lg p-1.5 text-gray-300 hover:bg-white/10 hover:text-white"
+                  aria-label="Close preview"
+                >
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
+              <div className="flex justify-center bg-black rounded-xl overflow-hidden">
+                <CroppedPanelImage
+                  src={preview.src}
+                  bbox={preview.bbox}
+                  alt={preview.label}
+                  maxHeight={Math.min(window.innerHeight * 0.7, 720)}
+                  className="max-w-full object-contain"
+                />
+              </div>
             </div>
-            <div className="flex justify-center bg-black rounded-xl overflow-hidden max-h-[70vh]">
-              <CroppedPanelImage
-                src={preview.src}
-                bbox={preview.bbox}
-                alt={preview.label}
-                className="max-w-full max-h-[70vh] object-contain"
-              />
-            </div>
-          </div>
-        </div>
-      )}
+          </div>,
+          document.body,
+        )}
     </>
   );
 }

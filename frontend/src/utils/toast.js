@@ -144,13 +144,14 @@ export const showToast = {
     });
   },
   
-  info: (message) => {
+  info: (message, extra = {}) => {
     toast.info(message, {
       ...defaultConfig,
       autoClose: 3000,
       icon: () => React.createElement(Info, { className: iconInfo }),
       className: infoClasses,
       progressClassName: progressInfo,
+      ...extra,
     });
   },
   

@@ -13,7 +13,6 @@ services:
       - FIREBASE_SERVICE_ACCOUNT_PATH=/run/secrets/firebase-sa.json
     volumes:
       - .:/app
-      - ..:/debug-logs
       - ${FIREBASE_SERVICE_ACCOUNT_PATH}:/run/secrets/firebase-sa.json:ro
     restart: unless-stopped
     ports:

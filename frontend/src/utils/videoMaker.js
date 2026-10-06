@@ -211,7 +211,7 @@ export async function generateVideoFromScenes({
       const bmp = await createImageBitmap(blob);
       imageBitmaps.push(bmp);
     }
-    
+
     let renderedFrames = 0;
     
     // 2. Render Loop (Optimized)

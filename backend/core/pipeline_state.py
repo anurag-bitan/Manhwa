@@ -35,7 +35,4 @@ def build_initial_pipeline_state(
         "timings": [],
         "combined_audio_url": "",
         "combined_audio_path": "",
-        "client_pages": False,
-        "client_page_count": 0,
-        "progress": {"status": "UPLOAD_PENDING", "current": 0, "total": 0, "detail": ""},
     }

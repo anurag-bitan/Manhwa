@@ -126,7 +126,6 @@ def process_queued_job(job_id: str) -> dict:
         )
         return final_state
     except Exception as exc:
-
         logger.exception("[pipeline] job_id=%s phase=process failed error_type=%s", job_id, type(exc).__name__)
         if isinstance(exc, ValueError):
             public_error = str(exc)

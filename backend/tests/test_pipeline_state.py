@@ -24,8 +24,6 @@ class PipelineStateTests(unittest.TestCase):
         self.assertEqual(state["chapter_number"], "7")
         self.assertEqual(state["series_context"], "Short blurb.")
         self.assertIsNone(state["error"])
-        self.assertFalse(state["client_pages"])
-        self.assertEqual(state["client_page_count"], 0)
 
     def test_lists_are_not_shared_between_jobs(self):
         first = build_initial_pipeline_state("first", "first/source.pdf")

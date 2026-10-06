@@ -329,6 +329,10 @@ const UploadPage = () => {
       return;
     }
 
+    showToast.info("Please stay in this window for a faster response.", {
+      autoClose: 6000,
+      position: "top-center",
+    });
     setIsProcessing(true);
     setProgress(0);
     setProgressDetail("Starting upload");
