@@ -53,4 +53,4 @@ try {
 Write-Host ""
 Write-Host "Deployment command completed for '$Environment'."
 Write-Host "Copy the environment's modal.run URL from the output and validate it before changing Vercel."
-Write-Host "Runbook: docs/MODAL_VERCEL.md"
+Write-Host "See README.md for Vercel cutover and schema.sql."

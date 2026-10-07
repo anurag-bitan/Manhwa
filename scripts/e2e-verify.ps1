@@ -15,6 +15,5 @@ Pop-Location
 if ($ApiBaseUrl) {
     & (Join-Path $PSScriptRoot "verify-deploy.ps1") -ApiBaseUrl $ApiBaseUrl
 } else {
-    Write-Host "Skip remote /health (pass -ApiBaseUrl after HF Space is live)."
-    Write-Host "Manual E2E: see docs/RENDER_VERCEL.md section 6."
+    Write-Host "Skip remote /health (pass -ApiBaseUrl to smoke-test an API)."
 }

@@ -19,4 +19,4 @@ try {
 
 Write-Host ""
 Write-Host "Set VITE_* env vars in Vercel project settings before relying on production."
-Write-Host "See docs/RENDER_VERCEL.md"
+Write-Host "Set VITE_API_BASE_URL to the Modal URL, then redeploy. See README.md."

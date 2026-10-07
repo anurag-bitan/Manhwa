@@ -1,45 +1,22 @@
-# Manhwa to Hindi Video Platform
+# Manhwa to Hindi Video
 
-Monorepo for the Manhwa AI frontend and processing backend.
+React frontend (Vercel) and FastAPI + OCR worker (Modal). Auth is Firebase; jobs and files live in Supabase; video muxing runs in the browser.
 
-## Repository layout
+## Layout
 
-- `frontend/` — React + Vite web application, deployed on **Vercel**
-- `backend/` — FastAPI API + detached OCR/Gemini/TTS worker, deployed on **Modal**
-- `docs/` — deployment and setup notes
-- `render.yaml` — retained Render rollback Blueprint
-- `firebase.json` — legacy Firebase Hosting config (frontend now uses Vercel)
+- `frontend/` — Vite app
+- `backend/` — FastAPI API, Modal worker (`modal_app.py`), local Docker
+- `backend/db/schema.sql` — full Supabase schema (run once in the SQL editor; safe to re-run)
+- `scripts/deploy-modal.ps1` / `scripts/deploy-vercel.ps1`
 
-## Architecture
-
-- **Firebase Auth** — Google sign-in and email/password (console configuration only)
-- **Modal** — scale-to-zero FastAPI API and detached OCR worker
-- **Gemini API** — search-grounded context + batched Hindi narration (`GEMINI_API_KEY`)
-- **Supabase** — private database and asset storage
-- **Browser (WebCodecs)** — video frame muxing on the user's CPU
-
-## Deployment (recommended)
-
-**[docs/MODAL_VERCEL.md](docs/MODAL_VERCEL.md)** — Modal backend + Vercel
-frontend, including staging, cost controls, cutover, and Render rollback.
-
-```powershell
-.\scripts\deploy-modal.ps1 -Environment staging -InstallDependencies
-.\scripts\deploy-vercel.ps1
-```
-
-## Local development
-
-Create local environment files from the committed examples. Never commit the real `.env` files.
+## Local
 
 ```powershell
 Copy-Item frontend/.env.example frontend/.env
 Copy-Item backend/.env.example backend/.env
 ```
 
-Set `GEMINI_API_KEY` and Supabase/Firebase values in `backend/.env`. For local token verification without a service account file, use `gcloud auth application-default login` and leave `FIREBASE_SERVICE_ACCOUNT_JSON` empty.
-
-Run the frontend:
+Fill Supabase, Firebase, and `GEMINI_API_KEY`. Local API uses `PIPELINE_EXECUTION_MODE=local`.
 
 ```powershell
 Set-Location frontend
@@ -47,15 +24,27 @@ npm ci
 npm run dev
 ```
 
-Run the backend stack after configuring `backend/.env`:
-
 ```powershell
 Set-Location backend
 docker compose up --build
 ```
 
-## Other hosting options
+API: `http://localhost:8000`. Point `VITE_API_BASE_URL` at that URL and restart Vite.
 
-- [docs/RENDER_VERCEL.md](docs/RENDER_VERCEL.md) — retained Render rollback
-- [docs/HF_SPACES_VERCEL.md](docs/HF_SPACES_VERCEL.md) — Hugging Face Docker (requires HF Pro)
-- [docs/GCP_DEPLOYMENT.md](docs/GCP_DEPLOYMENT.md) — legacy Cloud Run
+## Deploy
+
+1. Run `backend/db/schema.sql` in the Supabase SQL editor (if not already applied).
+2. Create Modal environments `staging` / `production` and a secret named `manhwa-backend-secrets` (same keys as `backend/.env.example`, plus `PIPELINE_EXECUTION_MODE=modal` and `CORS_ALLOWED_ORIGINS` for the Vercel origin).
+3. Cap Modal workspace spend if you use the Starter credit.
+4. Deploy:
+
+```powershell
+python -m pip install -r backend/requirements-modal.txt
+python -m modal setup
+.\scripts\deploy-modal.ps1 -Environment staging
+.\scripts\deploy-modal.ps1 -Environment production
+```
+
+5. Set Vercel `VITE_API_BASE_URL` to the printed `https://…modal.run` URL (no trailing slash) and **redeploy** the frontend. `VITE_*` is baked in at build time.
+
+Never commit `.env` files, Firebase JSON, or Modal tokens.

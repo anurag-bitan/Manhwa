@@ -156,10 +156,7 @@ class RequirementsFlattenTests(unittest.TestCase):
 class MigrationContractTests(unittest.TestCase):
     def test_migration_has_atomic_claim_and_stale_recovery(self):
         migration = (
-            Path(__file__).parents[1]
-            / "db"
-            / "migrations"
-            / "003_modal_dispatch_and_budget.sql"
+            Path(__file__).parents[1] / "db" / "schema.sql"
         ).read_text(encoding="utf-8")
         self.assertIn("for update", migration.lower())
         self.assertIn("claim_processing_job", migration)

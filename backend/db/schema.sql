@@ -1,6 +1,32 @@
+-- Single Supabase schema. Dashboard → SQL Editor → paste → Run.
+-- Safe to re-run (IF NOT EXISTS / CREATE OR REPLACE).
+
 begin;
 
+create table if not exists public.processing_jobs (
+    id uuid primary key,
+    status text not null,
+    pdf_storage_path text not null,
+    cognito_sub text,
+    state_json jsonb not null default '{}'::jsonb,
+    created_at timestamptz not null default now(),
+    started_at timestamptz,
+    modal_call_id text,
+    lease_owner text,
+    lease_expires_at timestamptz,
+    heartbeat_at timestamptz,
+    attempt_count integer not null default 0,
+    completed_at timestamptz,
+    runtime_seconds numeric(12,3),
+    worker_cpu numeric(6,2),
+    worker_memory_mib integer,
+    estimated_compute_cost_usd numeric(12,6)
+);
+
 alter table public.processing_jobs
+    add column if not exists cognito_sub text,
+    add column if not exists created_at timestamptz not null default now(),
+    add column if not exists started_at timestamptz,
     add column if not exists modal_call_id text,
     add column if not exists lease_owner text,
     add column if not exists lease_expires_at timestamptz,
@@ -12,11 +38,127 @@ alter table public.processing_jobs
     add column if not exists worker_memory_mib integer,
     add column if not exists estimated_compute_cost_usd numeric(12,6);
 
+create index if not exists processing_jobs_status_idx
+    on public.processing_jobs (status);
+create index if not exists processing_jobs_cognito_sub_idx
+    on public.processing_jobs (cognito_sub);
+create index if not exists processing_jobs_started_at_idx
+    on public.processing_jobs (started_at)
+    where started_at is not null;
+create index if not exists processing_jobs_owner_started_at_idx
+    on public.processing_jobs (cognito_sub, started_at)
+    where started_at is not null;
 create index if not exists processing_jobs_active_lease_idx
     on public.processing_jobs (lease_expires_at)
     where status = 'PROCESSING';
 
+alter table public.processing_jobs enable row level security;
+
+insert into storage.buckets (id, name, public)
+values
+    ('pdfs', 'pdfs', false),
+    ('pages', 'pages', false),
+    ('audio', 'audio', false)
+on conflict (id) do update
+set public = excluded.public;
+
+update storage.buckets
+set public = false
+where id in ('pdfs', 'pages', 'audio');
+
 drop function if exists public.queue_processing_job(uuid, text, integer, integer);
+
+create or replace function public.create_processing_upload(
+    p_job_id uuid,
+    p_cognito_sub text,
+    p_pdf_storage_path text,
+    p_state_json jsonb,
+    p_max_pending_uploads integer,
+    p_max_pending_uploads_global integer
+)
+returns text
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+    v_count bigint;
+begin
+    perform pg_advisory_xact_lock(731020260817);
+
+    update public.processing_jobs
+       set status = 'FAILED',
+           completed_at = now(),
+           lease_owner = null,
+           lease_expires_at = null,
+           state_json = jsonb_set(
+               jsonb_set(coalesce(state_json, '{}'::jsonb), '{status}', '"FAILED"'::jsonb, true),
+               '{error}',
+               '"Upload expired before start. Please upload again."'::jsonb,
+               true
+           )
+     where status = 'UPLOAD_PENDING'
+       and created_at < now() - interval '30 minutes';
+
+    select count(*)
+      into v_count
+      from public.processing_jobs
+     where cognito_sub = p_cognito_sub
+       and status = 'UPLOAD_PENDING'
+       and created_at >= now() - interval '2 hours';
+    if v_count >= greatest(p_max_pending_uploads, 1) then
+        return 'PENDING_LIMIT';
+    end if;
+
+    select count(*)
+      into v_count
+      from public.processing_jobs
+     where status = 'UPLOAD_PENDING'
+       and created_at >= now() - interval '2 hours';
+    if v_count >= greatest(p_max_pending_uploads_global, 1) then
+        return 'GLOBAL_PENDING_LIMIT';
+    end if;
+
+    insert into public.processing_jobs (
+        id, status, pdf_storage_path, cognito_sub, state_json
+    ) values (
+        p_job_id, 'UPLOAD_PENDING', p_pdf_storage_path, p_cognito_sub, p_state_json
+    );
+    return 'CREATED';
+end;
+$$;
+
+create or replace function public.recover_stale_processing_jobs()
+returns table(job_id uuid)
+language plpgsql
+security definer
+set search_path = ''
+as $$
+begin
+    return query
+    update public.processing_jobs
+       set status = 'FAILED',
+           state_json = jsonb_set(
+               jsonb_set(coalesce(state_json, '{}'::jsonb), '{status}', '"FAILED"'::jsonb, true),
+               '{error}',
+               '"Processing stopped unexpectedly. Please start a new upload."'::jsonb,
+               true
+           ),
+           completed_at = now(),
+           lease_owner = null,
+           lease_expires_at = null,
+           heartbeat_at = now()
+     where (
+           status not in ('UPLOAD_PENDING', 'QUEUED', 'TTS_COMPLETED', 'FAILED')
+           and (lease_expires_at is null or lease_expires_at < now())
+       )
+        or (
+           status = 'QUEUED'
+           and started_at < now() - interval '5 minutes'
+       )
+    returning id;
+end;
+$$;
 
 create or replace function public.queue_processing_job(
     p_job_id uuid,
@@ -180,38 +322,8 @@ begin
 end;
 $$;
 
-create or replace function public.recover_stale_processing_jobs()
-returns table(job_id uuid)
-language plpgsql
-security definer
-set search_path = ''
-as $$
-begin
-    return query
-    update public.processing_jobs
-       set status = 'FAILED',
-           state_json = jsonb_set(
-               jsonb_set(coalesce(state_json, '{}'::jsonb), '{status}', '"FAILED"'::jsonb, true),
-               '{error}',
-               '"Processing stopped unexpectedly. Please start a new upload."'::jsonb,
-               true
-           ),
-           completed_at = now(),
-           lease_owner = null,
-           lease_expires_at = null,
-           heartbeat_at = now()
-     where (
-           status not in ('UPLOAD_PENDING', 'QUEUED', 'TTS_COMPLETED', 'FAILED')
-           and (lease_expires_at is null or lease_expires_at < now())
-       )
-        or (
-           status = 'QUEUED'
-           and started_at < now() - interval '5 minutes'
-       )
-    returning id;
-end;
-$$;
-
+revoke all on function public.create_processing_upload(uuid, text, text, jsonb, integer, integer)
+    from public, anon, authenticated;
 revoke all on function public.queue_processing_job(uuid, text, integer, integer, numeric, numeric)
     from public, anon, authenticated;
 revoke all on function public.claim_processing_job(uuid, text, integer)
@@ -223,6 +335,8 @@ revoke all on function public.finish_processing_job(uuid, text, text, jsonb, num
 revoke all on function public.recover_stale_processing_jobs()
     from public, anon, authenticated;
 
+grant execute on function public.create_processing_upload(uuid, text, text, jsonb, integer, integer)
+    to service_role;
 grant execute on function public.queue_processing_job(uuid, text, integer, integer, numeric, numeric)
     to service_role;
 grant execute on function public.claim_processing_job(uuid, text, integer)

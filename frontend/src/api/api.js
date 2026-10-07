@@ -1,7 +1,7 @@
 import { auth } from "../lib/firebaseClient";
 import { supabase } from "../lib/supabaseClient";
 
-const API_URL = import.meta.env.VITE_API_BASE_URL?.replace(/\/$/, "");
+const API_URL = import.meta.env.VITE_API_BASE_URL?.trim().replace(/\/$/, "");
 
 export class ApiError extends Error {
   constructor(message, status = 0, details = null) {
@@ -58,8 +58,14 @@ async function authenticatedFetch(path, options = {}) {
       headers,
       signal,
     });
-  } catch {
-    throw new ApiError("Cannot reach the local API. Start the backend on port 8000 and retry.", 0);
+  } catch (err) {
+    if (err instanceof ApiError) throw err;
+    if (err?.name === "AbortError") throw err;
+    const target = API_URL || "(VITE_API_BASE_URL missing)";
+    throw new ApiError(
+      `Cannot reach the API at ${target}. Confirm this page origin is in CORS_ALLOWED_ORIGINS, the URL has no trailing slash, and Vite/Vercel was rebuilt after changing VITE_API_BASE_URL.`,
+      0,
+    );
   }
   const payload = await parseResponse(response);
 
