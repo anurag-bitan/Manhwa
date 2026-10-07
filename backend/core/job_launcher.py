@@ -1,34 +1,42 @@
+import logging
+
 from core.config import settings
+from db.supabase_admin import supabase_admin
+
+
+logger = logging.getLogger(__name__)
 
 
 class JobLaunchError(RuntimeError):
-    """Raised when the API cannot submit a Cloud Run Job execution."""
+    """Raised when the API cannot submit a detached worker."""
 
 
-def launch_cloud_run_job(job_id: str) -> str:
-    """Start one private Cloud Run Job execution without waiting for completion."""
-    job_resource = settings.cloud_run_job_resource
-    if not job_resource:
-        raise JobLaunchError(
-            "GCP_PROJECT_ID, GCP_REGION, and CLOUD_RUN_JOB_NAME must be configured"
-        )
-
+def launch_modal_job(job_id: str) -> str:
+    """Spawn one detached Modal call and persist its operational call ID."""
     try:
-        from google.cloud import run_v2
+        import modal
 
-        override = run_v2.RunJobRequest.Overrides(
-            container_overrides=[
-                run_v2.RunJobRequest.Overrides.ContainerOverride(
-                    env=[run_v2.EnvVar(name="JOB_ID", value=job_id)]
-                )
-            ],
-            task_count=1,
-            timeout=f"{settings.cloud_run_job_timeout_seconds}s",
+        worker = modal.Function.from_name(
+            settings.modal_app_name,
+            settings.modal_worker_function_name,
         )
-        request = run_v2.RunJobRequest(name=job_resource, overrides=override)
-        operation = run_v2.JobsClient().run_job(request=request)
+        call = worker.spawn(job_id)
     except Exception as exc:
-        raise JobLaunchError("Cloud Run Job submission failed") from exc
+        raise JobLaunchError("Modal worker submission failed") from exc
 
-    underlying_operation = getattr(operation, "operation", None)
-    return getattr(underlying_operation, "name", "") or "submitted"
+    call_id = str(getattr(call, "object_id", "") or "")
+    if not call_id:
+        logger.warning("Modal spawn returned no call ID job_id=%s", job_id)
+        call_id = "submitted"
+    try:
+        (
+            supabase_admin.table("processing_jobs")
+            .update({"modal_call_id": call_id})
+            .eq("id", job_id)
+            .execute()
+        )
+    except Exception:
+        # The worker is already detached. Do not roll the job back and risk a
+        # duplicate launch merely because operational metadata could not persist.
+        logger.exception("Could not persist Modal call ID job_id=%s", job_id)
+    return call_id

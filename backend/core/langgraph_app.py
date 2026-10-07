@@ -48,8 +48,9 @@ def extract_pages_node(state: PipelineState) -> PipelineState:
 def detect_panels_node(state: PipelineState) -> PipelineState:
     from workers.tasks import detect_panels
 
+    job_id = state["job_id"]
     panels_all = [
-        detect_panels(page["path"], i)
+        detect_panels(page["path"], i, job_id)
         for i, page in enumerate(state["page_urls"])
     ]
 
@@ -79,10 +80,36 @@ def detect_panels_node(state: PipelineState) -> PipelineState:
     return state
 
 
+_TERMINAL_STATUSES = {"TTS_COMPLETED", "FAILED"}
+
+
 def update_job_status(job_id: str, status: str):
+    """Record pipeline phase in state_json without breaking the worker lease.
+
+    Heartbeat/finish RPCs require processing_jobs.status to stay PROCESSING.
+    Writing EXTRACTED/OCR_COMPLETED onto that column made the lease look lost
+    and dropped the final panel payload.
+    """
+    if status in _TERMINAL_STATUSES:
+        return
     try:
-        supabase_admin.table("processing_jobs").update({"status": status}).eq("id", job_id).execute()
-        logger.debug("[pipeline] job_id=%s db status=%s", job_id, status)
+        response = (
+            supabase_admin.table("processing_jobs")
+            .select("state_json")
+            .eq("id", job_id)
+            .limit(1)
+            .execute()
+        )
+        if not response.data:
+            return
+        state = response.data[0].get("state_json") or {}
+        if not isinstance(state, dict):
+            state = {}
+        state["status"] = status
+        supabase_admin.table("processing_jobs").update(
+            {"state_json": state}
+        ).eq("id", job_id).eq("status", "PROCESSING").execute()
+        logger.debug("[pipeline] job_id=%s db phase=%s", job_id, status)
     except Exception:
         logger.exception("[pipeline] job_id=%s failed to update status=%s", job_id, status)
 
@@ -141,13 +168,22 @@ def _wrap_pipeline_node(node_name: str, fn: Callable[[PipelineState], PipelineSt
 
 
 def crop_and_ocr_node(state: PipelineState) -> PipelineState:
-    from workers.tasks import crop_and_ocr
+    from workers.tasks import ocr_all_panels
 
-    ocr_results = [
-        crop_and_ocr(panel, idx)
-        for idx, panel in enumerate(state["panels"])
-    ]
+    first_done = {"v": False}
 
+    def mark_ocr_progress():
+        if first_done["v"]:
+            return
+        first_done["v"] = True
+        state["status"] = "OCR_COMPLETED"
+        update_job_status(state["job_id"], state["status"])
+
+    ocr_results = ocr_all_panels(
+        state["panels"],
+        state["job_id"],
+        on_first_page_done=mark_ocr_progress,
+    )
     ocr_results.sort(key=lambda x: x["panel_index"])
     state["ocr_results"] = ocr_results
     state["status"] = "OCR_COMPLETED"
@@ -240,7 +276,8 @@ def _build_panel_thumbnails(state: PipelineState, story_scenes: list[dict]) -> d
         panel = state["panels"][panel_idx]
         page_path = panel["page_path"]
         if page_path not in page_cache:
-            page_cache[page_path] = supabase_admin.storage.from_("pages").download(page_path)
+            from workers.tasks import load_page_bytes
+            page_cache[page_path] = load_page_bytes(page_path, state.get("job_id"))
         try:
             thumbnails[segment_id] = panel_thumbnail_jpeg(
                 page_cache[page_path],

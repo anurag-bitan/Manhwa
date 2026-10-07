@@ -1,14 +1,26 @@
 import logging
+from collections import defaultdict
+
 from db.supabase_admin import supabase_admin
 from storage3.exceptions import StorageApiError
 import pypdfium2 as pdfium
 from PIL import Image
 import io
 import numpy as np
-import cv2
 from paddleocr import PaddleOCR
 
+from core.config import settings
+from core.page_ops import (
+    RENDER_SCALE,
+    assign_ocr_text_to_panels,
+    encode_jpeg,
+    parse_paddle_lines,
+)
+
 logger = logging.getLogger(__name__)
+
+# job_id -> {storage_path: jpeg bytes}
+_page_bytes: dict[str, dict[str, bytes]] = defaultdict(dict)
 
 # -------------------------------------------------------------------
 # Global PaddleOCR reader (loaded once when worker starts)
@@ -19,9 +31,31 @@ def get_ocr():
     global _ocr
     if _ocr is None:
         logger.info("[pipeline] PaddleOCR loading models (first run downloads ~100 MB)")
-        _ocr = PaddleOCR(lang='en')
-        logger.info("[pipeline] PaddleOCR ready")
+        try:
+            _ocr = PaddleOCR(lang="en", use_angle_cls=False, show_log=False)
+        except TypeError:
+            _ocr = PaddleOCR(lang="en", use_angle_cls=False)
+        logger.info("[pipeline] PaddleOCR ready engine=%s", settings.ocr_engine)
     return _ocr
+
+
+def cache_page_bytes(job_id: str, page_path: str, img_bytes: bytes) -> None:
+    _page_bytes[job_id][page_path] = img_bytes
+
+
+def load_page_bytes(page_path: str, job_id: str | None = None) -> bytes:
+    if job_id:
+        cached = _page_bytes.get(job_id, {}).get(page_path)
+        if cached:
+            return cached
+    img_bytes = supabase_admin.storage.from_("pages").download(page_path)
+    if job_id:
+        cache_page_bytes(job_id, page_path, img_bytes)
+    return img_bytes
+
+
+def clear_page_cache(job_id: str) -> None:
+    _page_bytes.pop(job_id, None)
 
 
 # -------------------------------------------------------------------
@@ -136,6 +170,7 @@ def _find_spine_gap(img, search_ratio=0.2, min_gap_width=15):
 # Synchronous processing functions used by one Cloud Run Job execution
 # -------------------------------------------------------------------
 def extract_pages(pdf_storage_path: str, job_id: str):
+    clear_page_cache(job_id)
     logger.info(
         "[pipeline] job_id=%s task=extract_pages download path=%s",
         job_id,
@@ -153,19 +188,17 @@ def extract_pages(pdf_storage_path: str, job_id: str):
     page_data_list = []
     for page_num in range(page_count):
         page = pdf[page_num]
-        bitmap = page.render(scale=2)
+        bitmap = page.render(scale=RENDER_SCALE)
         pil_image = bitmap.to_pil()
+        img_bytes = encode_jpeg(pil_image)
 
-        img_byte_arr = io.BytesIO()
-        pil_image.save(img_byte_arr, format="PNG")
-        img_bytes = img_byte_arr.getvalue()
-
-        storage_path = f"{job_id}/pages/page_{page_num:04d}.png"
+        storage_path = f"{job_id}/pages/page_{page_num:04d}.jpg"
+        cache_page_bytes(job_id, storage_path, img_bytes)
         try:
             supabase_admin.storage.from_("pages").upload(
                 path=storage_path,
                 file=img_bytes,
-                file_options={"content-type": "image/png"}
+                file_options={"content-type": "image/jpeg"}
             )
         except StorageApiError as e:
             if "Duplicate" in str(e) or "409" in str(e):
@@ -189,9 +222,9 @@ def extract_pages(pdf_storage_path: str, job_id: str):
     return page_data_list
 
 
-def detect_panels(page_path: str, page_number: int):
+def detect_panels(page_path: str, page_number: int, job_id: str | None = None):
     """Detect panels on any page layout (single, spread, partial spread)."""
-    img_bytes = supabase_admin.storage.from_("pages").download(page_path)
+    img_bytes = load_page_bytes(page_path, job_id)
     pil_img = Image.open(io.BytesIO(img_bytes)).convert('L')
     img = np.array(pil_img)
 
@@ -233,37 +266,58 @@ def detect_panels(page_path: str, page_number: int):
     return {"page_number": page_number, "boxes": all_boxes}
 
 
-def crop_and_ocr(panel_data: dict, panel_index: int):
-    """Crop a panel and run OCR, returning extracted text."""
-    page_path = panel_data["page_path"]
-    img_bytes = supabase_admin.storage.from_("pages").download(page_path)
-    page_img = Image.open(io.BytesIO(img_bytes))
-
-    x1, y1, x2, y2 = panel_data["bbox"]
+def _ocr_crop_text(page_img: Image.Image, bbox: list) -> str:
+    x1, y1, x2, y2 = bbox
     cropped = page_img.crop((x1, y1, x2, y2))
-
-    # Optional speed-up: resize if width > 800
     max_width = 800
     if cropped.width > max_width:
         ratio = max_width / cropped.width
-        new_height = int(cropped.height * ratio)
-        cropped = cropped.resize((max_width, new_height), Image.LANCZOS)
+        cropped = cropped.resize((max_width, int(cropped.height * ratio)), Image.LANCZOS)
+    result = get_ocr().ocr(np.array(cropped))
+    lines = parse_paddle_lines(result)
+    return " ".join(line["text"] for line in lines).strip()
 
-    cropped_np = np.array(cropped)
 
-    # Run PaddleOCR
-    result = get_ocr().ocr(cropped_np)
+def crop_and_ocr(panel_data: dict, panel_index: int, job_id: str | None = None):
+    """Crop a panel and run OCR, returning extracted text."""
+    page_path = panel_data["page_path"]
+    img_bytes = load_page_bytes(page_path, job_id)
+    page_img = Image.open(io.BytesIO(img_bytes))
 
-    # Extract text
-    text = ""
-    if result and result[0]:
-        for line in result[0]:
-            text += line[1][0] + " "
-    text = text.strip()
-
+    text = _ocr_crop_text(page_img, panel_data["bbox"])
     return {
         "panel_index": panel_index,
         "text": text,
         "bbox": panel_data["bbox"],
         "page_number": panel_data["page_number"]
     }
+
+
+def ocr_all_panels(panels: list[dict], job_id: str, on_first_page_done=None) -> list[dict]:
+    """OCR each unique page once, then map lines onto panel boxes."""
+    grouped: dict[str, list[tuple[int, dict]]] = defaultdict(list)
+    for idx, panel in enumerate(panels):
+        grouped[panel["page_path"]].append((idx, panel))
+
+    results: list[dict | None] = [None] * len(panels)
+    first_page = True
+    for page_path, items in grouped.items():
+        img_bytes = load_page_bytes(page_path, job_id)
+        page_img = Image.open(io.BytesIO(img_bytes))
+        page_np = np.array(page_img.convert("RGB"))
+        lines = parse_paddle_lines(get_ocr().ocr(page_np))
+        mapped = assign_ocr_text_to_panels(lines, [panel for _, panel in items])
+        for (idx, panel), text in zip(items, mapped):
+            if not text:
+                text = _ocr_crop_text(page_img, panel["bbox"])
+            results[idx] = {
+                "panel_index": idx,
+                "text": text,
+                "bbox": panel["bbox"],
+                "page_number": panel["page_number"],
+            }
+        if first_page and on_first_page_done:
+            on_first_page_done()
+            first_page = False
+
+    return [row for row in results if row is not None]

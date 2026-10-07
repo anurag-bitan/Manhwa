@@ -6,3 +6,5 @@ pydantic-settings
 python-dotenv
 firebase-admin>=6.5.0,<7
 google-genai>=1.0.0,<2
+Pillow
+Pillow

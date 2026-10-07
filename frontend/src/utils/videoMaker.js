@@ -13,7 +13,34 @@ const VIDEO_BITRATE = 2_500_000; // 2.5 Mbps
 // =====================================================================
 // Helpers
 // =====================================================================
-async function downloadImage(url, filename, retries = 3) {
+async function mapPool(items, limit, mapper) {
+  const out = new Array(items.length);
+  let nextIndex = 0;
+  const workerCount = Math.max(1, Math.min(limit, items.length));
+  async function worker() {
+    while (nextIndex < items.length) {
+      const idx = nextIndex;
+      nextIndex += 1;
+      out[idx] = await mapper(items[idx], idx);
+    }
+  }
+  await Promise.all(Array.from({ length: workerCount }, () => worker()));
+  return out;
+}
+
+async function waitForEncoder(encoder, maxQueue = 5) {
+  while (encoder.encodeQueueSize > maxQueue) {
+    await new Promise((resolve) => {
+      const previous = encoder.ondequeue;
+      encoder.ondequeue = () => {
+        encoder.ondequeue = previous;
+        resolve();
+      };
+    });
+  }
+}
+
+async function downloadImage(url, retries = 3) {
   for (let i = 0; i < retries; i++) {
     try {
       const response = await fetch(url);
@@ -205,12 +232,10 @@ export async function generateVideoFromScenes({
 
     // 1. Preload Images
     log('[Download] Fetching assets...');
-    const imageBitmaps = [];
-    for (let i = 0; i < imageUrls.length; i++) {
-      const blob = await downloadImage(imageUrls[i]);
-      const bmp = await createImageBitmap(blob);
-      imageBitmaps.push(bmp);
-    }
+    const imageBitmaps = await mapPool(imageUrls, 6, async (url) => {
+      const blob = await downloadImage(url);
+      return createImageBitmap(blob);
+    });
 
     let renderedFrames = 0;
     
@@ -248,18 +273,14 @@ export async function generateVideoFromScenes({
           duration: 1000000 / FPS 
         });
 
-        // ⚡ FIX 2: Prevent "Codec reclaimed" by pausing if queue is full
-        if (videoEncoder.encodeQueueSize > 5) {
-           await new Promise(r => setTimeout(r, 5));
-        }
+        await waitForEncoder(videoEncoder, 5);
 
         videoEncoder.encode(videoFrame, { keyFrame: frame % 60 === 0 });
         videoFrame.close();
 
         renderedFrames += 1;
-        
-        // ⚡ FIX 3: Critical yield to Main Thread to prevent browser hang
-        if (frame % 10 === 0) {
+
+        if (frame % 30 === 0) {
            await new Promise(r => setTimeout(r, 0));
         }
       }

@@ -7,6 +7,22 @@ from db.supabase_admin import supabase_admin
 
 router = APIRouter(prefix="/jobs", tags=["jobs"])
 
+_TERMINAL_STATUSES = {"TTS_COMPLETED", "FAILED"}
+
+
+def public_job_status(row: dict) -> dict:
+    """Expose pipeline phase to the client while the lease row stays PROCESSING."""
+    column = row.get("status")
+    phase = (row.get("state_json") or {}).get("status")
+    if (
+        column == "PROCESSING"
+        and isinstance(phase, str)
+        and phase
+        and phase not in _TERMINAL_STATUSES
+    ):
+        return {**row, "status": phase}
+    return row
+
 
 def create_signed_asset_url(bucket: str, path: str) -> str:
     response = supabase_admin.storage.from_(bucket).create_signed_url(
@@ -39,7 +55,7 @@ async def get_job_status(
     )
     if not job.data:
         raise HTTPException(status_code=404, detail="Job not found")
-    return job.data[0]
+    return public_job_status(job.data[0])
 
 @router.get("/{job_id}/assets")
 async def get_job_assets(

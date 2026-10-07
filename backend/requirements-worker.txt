@@ -5,9 +5,8 @@ opencv-python-headless==4.10.0.84
 edge-tts
 langgraph
 tenacity
-numpy<2
+numpy==1.26.4
 mutagen
 pydub
-# Installed separately in Docker (see Dockerfile); add for bare-metal Linux workers:
-# paddlepaddle==2.6.2
-# paddleocr==2.7.3
+paddlepaddle==2.6.2
+paddleocr==2.7.3

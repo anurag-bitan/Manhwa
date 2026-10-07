@@ -22,7 +22,6 @@ import {
 } from "lucide-react";
 
 import { ApiError, generateAudioStory, checkTaskStatus, previewManhwaContext } from '../api/api';
-import { generateVideoFromScenes } from '../utils/videoMaker';
 import PanelPreviewGrid from "../components/PanelPreviewGrid";
 import { buildPanelCards } from "../utils/panelCards";
 
@@ -206,6 +205,7 @@ const UploadPage = () => {
 
       setVideoLogs(prev => [...prev, "Video engine ready, continuing generation..."]);
 
+      const { generateVideoFromScenes } = await import("../utils/videoMaker");
       const result = await generateVideoFromScenes({
         imageUrls: data.image_urls,
         audioUrl: data.audio_url,
@@ -528,6 +528,7 @@ const UploadPage = () => {
       sessionStorage.setItem("videoLogs", JSON.stringify([]));
 
       // 4. Call Generator
+      const { generateVideoFromScenes } = await import("../utils/videoMaker");
       const result = await generateVideoFromScenes({
         // Standard names
         imageUrls: safeImages,

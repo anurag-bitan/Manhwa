@@ -1,12 +1,17 @@
 # Manhwa AI backend
 
-FastAPI service with an embedded OCR → Gemini → TTS pipeline (`PIPELINE_EXECUTION_MODE=local`).
+FastAPI API with a detached Modal OCR → Gemini/DeepSeek → TTS worker.
 
-## Production (Render)
+## Production (Modal)
 
-Deploy via the repo root [`render.yaml`](../render.yaml) Blueprint or a Render Web Service using this folder as the Docker context.
+Deploy `modal_app.py` with [`scripts/deploy-modal.ps1`](../scripts/deploy-modal.ps1).
 
-See **[docs/RENDER_VERCEL.md](../docs/RENDER_VERCEL.md)** for environment variables and steps.
+See **[docs/MODAL_VERCEL.md](../docs/MODAL_VERCEL.md)** for secrets, model
+preparation, budget controls, staging validation, cutover, and rollback.
+
+The existing Render deployment remains available as a rollback until Modal has
+passed manual production acceptance. Its instructions are in
+**[docs/RENDER_VERCEL.md](../docs/RENDER_VERCEL.md)**.
 
 ## Health check
 

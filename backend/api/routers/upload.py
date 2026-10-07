@@ -9,7 +9,7 @@ from pydantic import BaseModel, Field
 
 from core.auth import AuthenticatedUser, get_current_user
 from core.config import settings
-from core.job_launcher import JobLaunchError, launch_cloud_run_job
+from core.job_launcher import JobLaunchError, launch_modal_job
 from core.job_log import log_start, log_upload
 from core.pipeline_state import build_initial_pipeline_state
 from db.supabase_admin import supabase_admin
@@ -183,8 +183,10 @@ async def start_job(
         {
             "p_job_id": job_id_value,
             "p_cognito_sub": current_user.sub,
-            "p_max_user_starts_30d": settings.max_pipeline_starts_per_user_30d,
-            "p_max_global_starts_30d": settings.max_pipeline_starts_global_30d,
+            "p_max_user_starts_per_day": settings.max_pipeline_starts_per_user_day,
+            "p_max_global_starts_month": settings.max_pipeline_starts_global_month,
+            "p_monthly_budget_usd": settings.modal_monthly_compute_budget_usd,
+            "p_admission_cost_usd": settings.modal_job_admission_cost_usd,
         },
     ).execute()
     reservation_result = _rpc_scalar(reservation)
@@ -193,11 +195,17 @@ async def start_job(
     if reservation_result == "NOT_FOUND":
         log_start(logger, job_id_value, "failed job not found")
         raise HTTPException(status_code=404, detail="Job not found")
-    if reservation_result in {"BUSY", "USER_LIMIT", "GLOBAL_LIMIT"}:
+    if reservation_result in {
+        "BUSY",
+        "DAILY_LIMIT",
+        "MONTHLY_LIMIT",
+        "BUDGET_LIMIT",
+    }:
         messages = {
             "BUSY": "Another pipeline job is running. Please try again later.",
-            "USER_LIMIT": "Your 30-day processing limit has been reached.",
-            "GLOBAL_LIMIT": "The service's 30-day processing limit has been reached.",
+            "DAILY_LIMIT": "Your daily processing limit has been reached.",
+            "MONTHLY_LIMIT": "The service's monthly processing limit has been reached.",
+            "BUDGET_LIMIT": "The service's monthly compute safety limit has been reached.",
         }
         raise HTTPException(status_code=429, detail=messages[reservation_result])
     if isinstance(reservation_result, str) and reservation_result.startswith("ALREADY_"):
@@ -220,17 +228,22 @@ async def start_job(
 
             log_start(logger, job_id_value, "scheduling background pipeline (local)")
             background_tasks.add_task(process_queued_job, job_id_value)
-        elif execution_mode == "cloud_run":
-            log_start(logger, job_id_value, "launching Cloud Run job")
-            await asyncio.to_thread(launch_cloud_run_job, job_id_value)
+        elif execution_mode == "modal":
+            log_start(logger, job_id_value, "launching detached Modal worker")
+            await asyncio.to_thread(launch_modal_job, job_id_value)
         else:
             raise JobLaunchError(
-                "PIPELINE_EXECUTION_MODE must be either local or cloud_run"
+                "PIPELINE_EXECUTION_MODE must be either local or modal"
             )
     except JobLaunchError:
         (
             supabase_admin.table("processing_jobs")
-            .update({"status": "UPLOAD_PENDING", "started_at": None})
+            .update({
+                "status": "UPLOAD_PENDING",
+                "started_at": None,
+                "modal_call_id": None,
+                "estimated_compute_cost_usd": None,
+            })
             .eq("id", job_id_value)
             .eq("status", "QUEUED")
             .execute()

@@ -1,6 +1,10 @@
 # Deploy: Render backend + Vercel frontend
 
-Primary production path. **No GCP hosting** (no Cloud Run, Firebase Hosting, or Vertex).
+> **Migration status:** [Modal](MODAL_VERCEL.md) is the target backend. Keep
+> Render intact as the rollback service until Modal passes manual staging and
+> production acceptance.
+
+Render rollback path. **No GCP hosting** (no Cloud Run, Firebase Hosting, or Vertex).
 
 | Component | Platform |
 |-----------|----------|

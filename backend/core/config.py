@@ -25,16 +25,30 @@ class Settings(BaseSettings):
     storage_signed_url_ttl_seconds: int = 7200
     max_pdf_bytes: int = 50 * 1024 * 1024
     pipeline_execution_mode: str = "local"
+    modal_app_name: str = "manhwa-video-backend"
+    modal_worker_function_name: str = "process-job"
+    modal_worker_timeout_seconds: int = 7200
+    modal_worker_cpu: float = 2.0
+    modal_worker_memory_mib: int = 10240
+    modal_heartbeat_interval_seconds: int = 30
+    modal_lease_seconds: int = 180
+    modal_monthly_compute_budget_usd: float = 27.50
+    # Reserved at admission, then replaced with measured compute after completion.
+    modal_job_admission_cost_usd: float = 0.50
+    modal_cpu_cost_per_core_second_usd: float = 0.0000131
+    modal_memory_cost_per_gib_second_usd: float = 0.00000222
     gcp_project_id: str = ""
     gcp_region: str = "europe-west1"
     cloud_run_job_name: str = "manhwa-pipeline"
     cloud_run_job_timeout_seconds: int = 7200
-    max_pipeline_starts_per_user_30d: int = 3
-    max_pipeline_starts_global_30d: int = 10
+    max_pipeline_starts_per_user_day: int = 5
+    max_pipeline_starts_global_month: int = 150
     max_pending_uploads_per_user: int = 2
     max_pending_uploads_global: int = 5
     narration_batch_size: int = 12
     tts_concurrency: int = 4
+    # paddle is implemented. rapid (RapidOCR/ONNX) is a later optional swap.
+    ocr_engine: str = "paddle"
 
     @property
     def cors_origins(self) -> list[str]:
