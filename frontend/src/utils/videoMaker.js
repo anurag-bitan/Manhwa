@@ -28,8 +28,12 @@ async function mapPool(items, limit, mapper) {
   return out;
 }
 
+function encoderIsOpen(encoder) {
+  return encoder.state === "configured";
+}
+
 async function waitForEncoder(encoder, maxQueue = 5) {
-  while (encoder.encodeQueueSize > maxQueue) {
+  while (encoderIsOpen(encoder) && encoder.encodeQueueSize > maxQueue) {
     await new Promise((resolve) => {
       const previous = encoder.ondequeue;
       encoder.ondequeue = () => {
@@ -37,6 +41,15 @@ async function waitForEncoder(encoder, maxQueue = 5) {
         resolve();
       };
     });
+  }
+}
+
+async function flushAndCloseEncoder(encoder) {
+  if (encoderIsOpen(encoder)) {
+    await encoder.flush();
+  }
+  if (encoder.state !== "closed") {
+    encoder.close();
   }
 }
 
@@ -169,6 +182,9 @@ async function processAudio(audioBuffer, muxer) {
       data: data
     });
 
+    if (!encoderIsOpen(audioEncoder)) {
+      throw new Error("Audio encoder closed before encoding finished");
+    }
     audioEncoder.encode(audioData);
     audioData.close();
     
@@ -176,7 +192,7 @@ async function processAudio(audioBuffer, muxer) {
     await new Promise(r => setTimeout(r, 0));
   }
 
-  await audioEncoder.flush();
+  await flushAndCloseEncoder(audioEncoder);
 }
 
 // =====================================================================
@@ -213,9 +229,13 @@ export async function generateVideoFromScenes({
       fastStart: 'in-memory',
     });
 
+    let videoEncoderError = null;
     const videoEncoder = new VideoEncoder({
       output: (chunk, meta) => muxer.addVideoChunk(chunk, meta),
-      error: (e) => console.error('[VideoEncoder]', e)
+      error: (e) => {
+        videoEncoderError = e;
+        console.error("[VideoEncoder]", e);
+      },
     });
 
     // ⚡ FIX 1: This codec settings works perfectly with 720p
@@ -274,6 +294,9 @@ export async function generateVideoFromScenes({
         });
 
         await waitForEncoder(videoEncoder, 5);
+        if (!encoderIsOpen(videoEncoder)) {
+          throw videoEncoderError || new Error("Video encoder closed during render");
+        }
 
         videoEncoder.encode(videoFrame, { keyFrame: frame % 60 === 0 });
         videoFrame.close();
@@ -299,7 +322,10 @@ export async function generateVideoFromScenes({
     }
 
     log('[Finalize] Saving video...');
-    await videoEncoder.flush();
+    if (!encoderIsOpen(videoEncoder)) {
+      throw videoEncoderError || new Error("Video encoder closed before finalize");
+    }
+    await flushAndCloseEncoder(videoEncoder);
     muxer.finalize();
 
     const { buffer } = muxer.target;
